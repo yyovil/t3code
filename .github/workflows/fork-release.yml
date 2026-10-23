@@ -1,0 +1,391 @@
+name: Fork release
+
+# Fork-only (yyovil/t3code). Builds the macOS arm64 desktop app and the
+# linux-x64 `t3` CLI archive from one ref on GitHub-hosted runners, without
+# upstream's secrets or infra, and publishes both as one prerelease.
+#
+# Versions use upstream's nightly format so the app is branded and identified
+# as "T3 Code (Nightly)" and installs over it. The run number is offset far
+# above upstream's release.yml run numbers, so a fork build sorts at or above
+# any upstream nightly from the same day.
+#
+# The desktop app is built with no update feed: it is ad-hoc signed, so
+# Squirrel.Mac could not apply an update anyway, and it must never follow
+# pingdotgg's releases. Settings shows automatic updates as unavailable.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or commit to build"
+        required: false
+        default: fork
+        type: string
+
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RUN_NUMBER_OFFSET: 1000000
+  KEEP_RELEASES: 5
+
+jobs:
+  bundle:
+    name: Build JS bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      # Same anonymous sparse checkout as release-desktop.yml: checkout's
+      # credential cleanup fails on the orphaned gitlinks under .repos.
+      - name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ inputs.ref }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install bundle dependencies
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - id: meta
+        name: Resolve version
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          node scripts/resolve-nightly-release.ts \
+            --date "$(date -u +%Y%m%d)" \
+            --run-number "$((GITHUB_RUN_NUMBER + RUN_NUMBER_OFFSET))" \
+            --sha "$sha" > "$RUNNER_TEMP/meta.txt"
+          cat "$RUNNER_TEMP/meta.txt"
+          version="$(sed -n 's/^version=//p' "$RUNNER_TEMP/meta.txt")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=fork-v$version" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+
+      # Public T3 Connect identifiers (Clerk publishable key, relay URL), the
+      # same ones desktop-macos-preview.yml builds with.
+      - name: Align package versions and public configuration
+        run: |
+          node scripts/update-release-package-versions.ts "${{ steps.meta.outputs.version }}"
+          grep -E '^T3CODE_[A-Z_]+=' .env.example >> "$GITHUB_ENV"
+
+      - name: Install browser secret helper build libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config
+
+      - name: Build JS bundle
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop
+
+      # Same layout as release.yml's js-bundle: download into `apps`.
+      - name: Upload JS bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: js-bundle
+          path: |
+            apps/server/dist
+            apps/desktop/dist-electron
+          if-no-files-found: error
+          retention-days: 1
+
+  desktop_mac_arm64:
+    name: Desktop macOS arm64
+    needs: bundle
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.bundle.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install desktop dependencies
+        run: vp install --filter=@t3tools/desktop... --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: native/resource-monitor/target/aarch64-apple-darwin/release/t3-resource-monitor
+          key: resource-monitor-aarch64-apple-darwin-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+
+      - name: Build resource monitor
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target aarch64-apple-darwin
+
+      - name: Align package versions and public configuration
+        run: |
+          node scripts/update-release-package-versions.ts "${{ needs.bundle.outputs.version }}"
+          grep -E '^T3CODE_[A-Z_]+=' .env.example >> "$GITHUB_ENV"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      # No GITHUB_REPOSITORY means no update feed (resolveGitHubPublishConfig
+      # in scripts/build-desktop-artifact.ts), so the app never polls a
+      # release it cannot install.
+      - name: Build desktop artifact
+        shell: bash
+        env:
+          T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR: true
+        run: |
+          set -euo pipefail
+          env -u GITHUB_REPOSITORY -u T3CODE_DESKTOP_UPDATE_REPOSITORY \
+            vp run dist:desktop:artifact \
+              --platform mac --target dmg --arch arm64 \
+              --build-version "${{ needs.bundle.outputs.version }}" \
+              --skip-build --verbose
+
+      # Unsigned electron-builder output keeps only Electron's linker signature,
+      # which no longer seals the modified bundle, so Gatekeeper reports the app
+      # as damaged. electron-builder ad-hoc signs only for `mac.identity: "-"`,
+      # which the upstream build script does not expose, so sign it here in
+      # and swap it into the DMG to keep the DMG's layout.
+      - name: Ad-hoc sign app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg="$(ls release/*.dmg)"
+          format="$(hdiutil imageinfo "$dmg" | sed -n 's/^Format: //p')"
+          rw="$RUNNER_TEMP/rw.dmg"
+          hdiutil convert "$dmg" -format UDRW -o "$rw"
+          hdiutil resize -size "$(( $(stat -f%z "$rw") / 1048576 + 64 ))m" "$rw"
+          # codesign fails with an internal error on the mounted HFS volume,
+          # so sign a copy on local disk and swap it in.
+          app="$RUNNER_TEMP/T3 Code (Nightly).app"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -mountpoint "$mount" "$rw"
+          ditto "$mount/T3 Code (Nightly).app" "$app"
+          xattr -cr "$app"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          rm -rf "$mount/T3 Code (Nightly).app"
+          ditto "$app" "$mount/T3 Code (Nightly).app"
+          hdiutil detach "$mount"
+          hdiutil convert "$rw" -format "$format" -ov -o "$dmg"
+
+      - name: Verify app bundle
+        shell: bash
+        env:
+          VERSION: ${{ needs.bundle.outputs.version }}
+        run: |
+          set -euo pipefail
+          dmg="$(ls release/*.dmg)"
+          mount="$(mktemp -d)"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$dmg"
+          trap 'hdiutil detach "$mount" -force || true' EXIT
+          app="$mount/T3 Code (Nightly).app"
+          plist="$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = "$VERSION"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist"
+          if [[ -e "$app/Contents/Resources/app-update.yml" ]]; then
+            echo "app-update.yml must not ship in fork builds:" >&2
+            cat "$app/Contents/Resources/app-update.yml" >&2
+            exit 1
+          fi
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E 'Identifier|Signature|TeamIdentifier|flags'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          file "$app/Contents/MacOS/"*
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: desktop-mac-arm64
+          path: release/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+
+  cli_linux_x64:
+    name: CLI linux-x64
+    needs: bundle
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        shell: bash
+        env:
+          CHECKOUT_REF: ${{ needs.bundle.outputs.sha }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --depth=1 origin "$CHECKOUT_REF"
+          git sparse-checkout set --no-cone '/*' '!/.repos/'
+          git checkout --detach FETCH_HEAD
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Install CLI dependencies
+        run: vp install --filter=t3... --filter=@t3tools/scripts...
+
+      - name: Cache resource monitor
+        id: resource_monitor_cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor
+          key: resource-monitor-x86_64-unknown-linux-gnu-${{ hashFiles('native/resource-monitor/Cargo.lock', 'native/resource-monitor/Cargo.toml', 'native/resource-monitor/src/**') }}
+
+      - name: Setup Rust
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build resource monitor
+        if: steps.resource_monitor_cache.outputs.cache-hit != 'true'
+        run: cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml --target x86_64-unknown-linux-gnu
+
+      - name: Align package versions and public configuration
+        run: |
+          node scripts/update-release-package-versions.ts "${{ needs.bundle.outputs.version }}"
+          grep -E '^T3CODE_[A-Z_]+=' .env.example >> "$GITHUB_ENV"
+
+      - name: Download JS bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: js-bundle
+          path: apps
+
+      - name: Apply web client branding
+        run: node scripts/apply-web-brand-assets.ts nightly apps/server/dist/client
+
+      - name: Build CLI single-executable
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: node apps/server/scripts/cli.ts build-exe --verbose
+
+      - name: Build CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cli-resource-monitor/linux-x64"
+          cp native/resource-monitor/target/x86_64-unknown-linux-gnu/release/t3-resource-monitor \
+            "$RUNNER_TEMP/cli-resource-monitor/linux-x64/"
+          node scripts/build-cli-archive.ts \
+            --platform linux --arch x64 \
+            --version "${{ needs.bundle.outputs.version }}" \
+            --resource-monitor-dir "$RUNNER_TEMP/cli-resource-monitor" \
+            --output-dir release-cli
+
+      - name: Smoke-test CLI archive
+        run: node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "${{ needs.bundle.outputs.version }}"
+
+      - name: Upload CLI archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: cli-linux-x64
+          path: release-cli/*
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish prerelease
+    needs: [bundle, desktop_mac_arm64, cli_linux_x64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download DMG
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: desktop-mac-arm64
+          path: release-assets
+
+      - name: Download CLI archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: cli-linux-x64
+          path: release-assets
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.bundle.outputs.tag }}
+          SHA: ${{ needs.bundle.outputs.sha }}
+          SHORT_SHA: ${{ needs.bundle.outputs.short_sha }}
+          VERSION: ${{ needs.bundle.outputs.version }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+          printf 'Fork build of `%s` at %s.\n\nUnsigned (ad-hoc) macOS arm64 app with no update feed, and the linux-x64 `t3` CLI archive.\n' \
+            "$REF" "$SHA" > "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --prerelease \
+            --title "T3 Code Fork $VERSION ($SHORT_SHA)" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            -- *
+
+      - name: Prune old fork releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("fork-v"))] | sort_by(.createdAt) | reverse | .[env.KEEP_RELEASES | tonumber:] | .[].tagName' |
+            while read -r tag; do
+              echo "Deleting $tag"
+              gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done
