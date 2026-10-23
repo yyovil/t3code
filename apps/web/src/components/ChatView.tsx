@@ -295,7 +295,7 @@ import {
 import { QueuedRunsControl, type QueuedRunsControlHandle } from "./chat/QueuedRunsControl";
 import { ReadAloudBar } from "../readAloud/ReadAloudBar";
 import { readAloudPlayer } from "../readAloud/readAloudPlayer";
-import { useReadAloudThreadScope } from "../readAloud/useReadAloud";
+import { ReadAloudThreadScope } from "../readAloud/useReadAloud";
 import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullRequest";
 import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
@@ -414,7 +414,6 @@ export default function ChatView(props: ChatViewProps) {
   const draftId = routeKind === "draft" ? props.draftId : null;
   const handleNewThread = useNewThreadHandler();
   const routeThreadRef = scopeThreadRef(environmentId, threadId);
-  useReadAloudThreadScope(environmentId, threadId);
   const routeThreadKey = scopedThreadKey(routeThreadRef);
   const currentRouteThreadKeyRef = useRef<string | null>(routeThreadKey);
   useLayoutEffect(() => {
@@ -3903,6 +3902,7 @@ export default function ChatView(props: ChatViewProps) {
       <RevertConfirmHost threadKey={routeThreadKey} onConfirm={onConfirmRevertStable} />
       <LinkPullRequestDialogHost />
       <ThreadVisitWatermark threadRef={routeThreadRef} />
+      <ReadAloudThreadScope environmentId={environmentId} threadId={threadId} />
       <ExpandedImageDialogHost threadKey={routeThreadKey} />
     </div>
   );
