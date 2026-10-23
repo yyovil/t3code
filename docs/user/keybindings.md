@@ -146,6 +146,9 @@ a shortcut.
 `thread.stop` interrupts the running turn in the focused thread. It has no default
 shortcut; assign one in **Settings → Keybindings**.
 
+`readAloud.stop` (`escape` by default) stops a reply being [read aloud](read-aloud.md).
+When nothing is playing, Escape does whatever it would otherwise do.
+
 `thread.undo` (`mod+z` by default) reverses the actions shown in the notice at the
 bottom of the sidebar, such as unpin, settle, snooze, archive, or discarding a
 draft. Consecutive

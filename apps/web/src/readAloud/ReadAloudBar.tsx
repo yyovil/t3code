@@ -80,9 +80,7 @@ export function ReadAloudBar({ stopShortcut }: { readonly stopShortcut: string |
                 {active.index + 1}/{active.segmentCount}
               </span>
             ) : null}
-            <span className="min-w-0 truncate text-foreground/80" aria-live="polite">
-              {caption}
-            </span>
+            <span className="min-w-0 truncate text-foreground/80">{caption}</span>
           </ComposerBanner.Content>
           <ComposerBanner.Actions className="flex-nowrap">
             <TransportButton
