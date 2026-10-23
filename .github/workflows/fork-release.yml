@@ -334,15 +334,19 @@ jobs:
           if-no-files-found: error
           compression-level: 0
 
+  # The CLI is what this fork deploys; the desktop app is optional, so a
+  # failed mac job publishes the CLI alone.
   release:
     name: Publish prerelease
     needs: [bundle, desktop_mac_arm64, cli_linux_x64]
+    if: ${{ !cancelled() && needs.bundle.result == 'success' && needs.cli_linux_x64.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - name: Download DMG
+        if: needs.desktop_mac_arm64.result == 'success'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: desktop-mac-arm64
@@ -363,13 +367,18 @@ jobs:
           SHORT_SHA: ${{ needs.bundle.outputs.short_sha }}
           VERSION: ${{ needs.bundle.outputs.version }}
           REF: ${{ inputs.ref }}
+          MAC_RESULT: ${{ needs.desktop_mac_arm64.result }}
         run: |
           set -euo pipefail
           cd release-assets
           sha256sum -- * > SHA256SUMS
           cat SHA256SUMS
-          printf 'Fork build of `%s` at %s.\n\nUnsigned (ad-hoc) macOS arm64 app with no update feed, and the linux-x64 `t3` CLI archive.\n' \
-            "$REF" "$SHA" > "$RUNNER_TEMP/notes.md"
+          printf 'Fork build of `%s` at %s.\n\nThe linux-x64 `t3` CLI archive' "$REF" "$SHA" > "$RUNNER_TEMP/notes.md"
+          if [[ "$MAC_RESULT" == "success" ]]; then
+            printf ', and the ad-hoc signed macOS arm64 app with no update feed.\n' >> "$RUNNER_TEMP/notes.md"
+          else
+            printf '. The macOS build failed, so this release has no DMG.\n' >> "$RUNNER_TEMP/notes.md"
+          fi
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
             --target "$SHA" \
             --prerelease \
