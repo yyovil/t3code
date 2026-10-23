@@ -46,6 +46,11 @@ import {
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
+import {
+  DEFAULT_READ_ALOUD_TTS_MODEL,
+  DEFAULT_READ_ALOUD_VOICE_ID,
+  ReadAloudSpeed,
+} from "./readAloud.ts";
 
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
@@ -483,6 +488,8 @@ export const ClientSettingsSchema = Schema.Struct({
   // Opt-in TeX typesetting in rendered Markdown. Off keeps math parsing and
   // KaTeX out of the render path entirely.
   mathRenderingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  // The transport remembers the last speed per client; Settings edits the same value.
+  readAloudSpeed: ReadAloudSpeed.pipe(Schema.withDecodingDefault(Effect.succeed(1 as const))),
 });
 export type ClientSettings = typeof ClientSettingsSchema.Type;
 
@@ -830,6 +837,20 @@ export const GitHubHost = TrimmedNonEmptyString.pipe(
 
 export const SourceControlHostSettings = Schema.Record(Schema.String, Schema.Unknown);
 export type SourceControlHostSettings = typeof SourceControlHostSettings.Type;
+
+export const ReadAloudSettings = Schema.Struct({
+  elevenLabsApiKey: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed("")),
+    secretSetting,
+  ),
+  voiceId: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_READ_ALOUD_VOICE_ID)),
+  ),
+  ttsModel: TrimmedString.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_READ_ALOUD_TTS_MODEL)),
+  ),
+});
+export type ReadAloudSettings = typeof ReadAloudSettings.Type;
 
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -1285,6 +1306,11 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   reviewGuideInstructions: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Null narrates with the text generation model. */
+  readAloudModelSelection: Schema.NullOr(ModelSelection).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  readAloud: ReadAloudSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 
   pullRequestMergeMethod: Schema.NullOr(PullRequestMergeMethod).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -1606,6 +1632,15 @@ export const ServerSettingsPatch = Schema.Struct({
   reviewGuidesEnabled: Schema.optionalKey(Schema.Boolean),
   reviewGuideModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
   reviewGuideInstructions: Schema.optionalKey(TrimmedString),
+  readAloudModelSelection: Schema.optionalKey(Schema.NullOr(ModelSelection)),
+  /** Merges per field. The API key follows the redaction-marker rules of `sourceControlHosts`. */
+  readAloud: Schema.optionalKey(
+    Schema.Struct({
+      elevenLabsApiKey: Schema.optionalKey(TrimmedString),
+      voiceId: Schema.optionalKey(TrimmedString),
+      ttsModel: Schema.optionalKey(TrimmedString),
+    }),
+  ),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),
   observability: Schema.optionalKey(
     Schema.Struct({
@@ -1752,5 +1787,6 @@ export const ClientSettingsPatch = Schema.Struct({
   snapShotAnimations: Schema.optionalKey(Schema.Boolean),
   wordWrap: Schema.optionalKey(Schema.Boolean),
   mathRenderingEnabled: Schema.optionalKey(Schema.Boolean),
+  readAloudSpeed: Schema.optionalKey(ReadAloudSpeed),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

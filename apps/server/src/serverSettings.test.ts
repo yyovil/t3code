@@ -1290,6 +1290,37 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
   );
 
+  it.effect("keeps the ElevenLabs key in the secret store and off the wire", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const store = yield* ServerSecretStore.ServerSecretStore;
+      const saved = yield* service.updateSettings({
+        readAloud: { elevenLabsApiKey: "xi-secret", voiceId: "voice-a" },
+      });
+      assert.equal(saved.readAloud.elevenLabsApiKey, "xi-secret");
+      const client = ServerSettingsModule.redactServerSettingsForClient(saved);
+      assert.deepEqual(client.readAloud, {
+        elevenLabsApiKey: "••••••",
+        voiceId: "voice-a",
+        ttsModel: "eleven_flash_v2_5",
+      });
+      assert.notInclude(yield* fs.readFileString(config.settingsPath), "xi-secret");
+      assert.isTrue(Option.isSome(yield* store.get("read-aloud-ZWxldmVuTGFic0FwaUtleQ")));
+
+      // A client echoing the marker keeps the key; changing another field keeps it too.
+      const echoed = yield* service.updateSettings({ readAloud: client.readAloud });
+      assert.equal(echoed.readAloud.elevenLabsApiKey, "xi-secret");
+      const renamed = yield* service.updateSettings({ readAloud: { ttsModel: "eleven_v4" } });
+      assert.equal(renamed.readAloud.elevenLabsApiKey, "xi-secret");
+
+      const cleared = yield* service.updateSettings({ readAloud: { elevenLabsApiKey: "" } });
+      assert.equal(cleared.readAloud.elevenLabsApiKey, "");
+      assert.isTrue(Option.isNone(yield* store.get("read-aloud-ZWxldmVuTGFic0FwaUtleQ")));
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
+
   it.effect("moves saved provider credentials to the secret store when settings load", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
