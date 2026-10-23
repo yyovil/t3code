@@ -69,8 +69,8 @@ describe("listVoices", () => {
       const seen: Array<{ token: string | null; key: string | undefined }> = [];
       const client = HttpClient.make((request) =>
         Effect.sync(() => {
-          const token =
-            request.urlParams.params.find(([name]) => name === "next_page_token")?.[1] ?? null;
+          const param = request.urlParams.params.find(([name]) => name === "next_page_token")?.[1];
+          const token = typeof param === "string" ? param : null;
           seen.push({ token, key: request.headers["xi-api-key"] });
           return HttpClientResponse.fromWeb(
             request,
