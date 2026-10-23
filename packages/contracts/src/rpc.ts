@@ -102,6 +102,13 @@ import {
   AttachmentUploadSigningKeyError,
 } from "./assets.ts";
 import {
+  ReadAloudListVoicesError,
+  ReadAloudListVoicesResult,
+  ReadAloudPrepareError,
+  ReadAloudPrepareInput,
+  ReadAloudPrepareResult,
+} from "./readAloud.ts";
+import {
   PersistChatAttachmentsError,
   PersistChatAttachmentsInput,
   PersistChatAttachmentsResult,
@@ -398,6 +405,8 @@ export const WS_METHODS = {
   agentSessionsScan: "agentSessions.scan",
   agentSessionsImport: "agentSessions.import",
   assetsCreateUrl: "assets.createUrl",
+  readAloudPrepare: "readAloud.prepare",
+  readAloudListVoices: "readAloud.listVoices",
   assetsPersistChatAttachments: "assets.persistChatAttachments",
   attachmentsCreateUploadUrl: "attachments.createUploadUrl",
   attachmentsDelete: "attachments.delete",
@@ -1292,6 +1301,18 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   ]),
 });
 
+const WsReadAloudPrepareRpc = Rpc.make(WS_METHODS.readAloudPrepare, {
+  payload: ReadAloudPrepareInput,
+  success: ReadAloudPrepareResult,
+  error: Schema.Union([ReadAloudPrepareError, EnvironmentAuthorizationError]),
+});
+
+const WsReadAloudListVoicesRpc = Rpc.make(WS_METHODS.readAloudListVoices, {
+  payload: Schema.Struct({}),
+  success: ReadAloudListVoicesResult,
+  error: Schema.Union([ReadAloudListVoicesError, EnvironmentAuthorizationError]),
+});
+
 const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
@@ -2001,6 +2022,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsAgentSessionsScanRpc,
   WsAgentSessionsImportRpc,
   WsAssetsCreateUrlRpc,
+  WsReadAloudPrepareRpc,
+  WsReadAloudListVoicesRpc,
   WsAssetsPersistChatAttachmentsRpc,
   WsAttachmentsCreateUploadUrlRpc,
   WsAttachmentsDeleteRpc,

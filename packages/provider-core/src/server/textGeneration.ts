@@ -95,6 +95,36 @@ export type ReviewGuideGenerationResult = Omit<
   "headSha" | "generatedAt" | "modelSelection"
 >;
 
+export interface NarrationBlock {
+  readonly index: number;
+  readonly kind: string;
+  /** The block's markdown as written. */
+  readonly source: string;
+}
+
+export interface NarrationGenerationInput {
+  cwd: string;
+  blocks: ReadonlyArray<NarrationBlock>;
+  threadTitle: string;
+  /** The user message this response answers. */
+  userPrompt: string;
+  /** The exchange before it, since follow-ups like "why not?" only make sense with it. */
+  previousExchange?: { readonly user: string; readonly assistant: string } | undefined;
+  changedFiles: ReadonlyArray<string>;
+  modelSelection: ModelSelection;
+}
+
+export interface NarrationSegmentDraft {
+  readonly firstBlock: number;
+  readonly lastBlock: number;
+  readonly speech: string;
+}
+
+/** Raw model output. Callers repair coverage before trusting the block ranges. */
+export interface NarrationGenerationResult {
+  readonly segments: ReadonlyArray<NarrationSegmentDraft>;
+}
+
 export interface ProviderTextGeneration {
   readonly generateCommitMessage: (
     input: CommitMessageGenerationInput,
@@ -115,4 +145,8 @@ export interface ProviderTextGeneration {
   readonly generateReviewGuide: (
     input: ReviewGuideGenerationInput,
   ) => Effect.Effect<ReviewGuideGenerationResult, TextGenerationError>;
+
+  readonly generateNarration: (
+    input: NarrationGenerationInput,
+  ) => Effect.Effect<NarrationGenerationResult, TextGenerationError>;
 }
