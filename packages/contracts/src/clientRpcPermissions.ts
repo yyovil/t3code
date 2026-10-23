@@ -31,7 +31,6 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.pullRequestsGenerateReviewGuide]: AuthOrchestrationOperateScope,
   // Narrating runs a model and spends the environment's ElevenLabs credits.
   [WS_METHODS.readAloudPrepare]: AuthOrchestrationOperateScope,
-  [WS_METHODS.readAloudListVoices]: AuthSettingsWriteScope,
   [WS_METHODS.sourceControlCloneRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.sourceControlPublishRepository]: AuthSourceControlWriteScope,
   [WS_METHODS.projectCloneStart]: AuthSourceControlWriteScope,

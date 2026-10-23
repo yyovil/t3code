@@ -89,10 +89,10 @@ export const READ_ALOUD_OFFSET_ATTRIBUTE = "data-read-aloud-offset";
 
 interface AnchorHastNode {
   type: string;
-  tagName?: string;
-  properties?: Record<string, unknown>;
-  position?: { start: { offset?: number | undefined } };
-  children?: AnchorHastNode[];
+  tagName?: string | undefined;
+  properties?: Record<string, unknown> | undefined;
+  position?: { start: { offset?: number | undefined } } | undefined;
+  children?: AnchorHastNode[] | undefined;
 }
 
 function tagOffset(node: AnchorHastNode) {

@@ -110,7 +110,7 @@ export const narrationCacheKey = Effect.fn("ReadAloudService.narrationCacheKey")
 });
 
 /** What ElevenLabs hears around a segment, so speech flows across the joins. */
-export function stitchContext(segments: ReadonlyArray<NarrationSegment>, index: number) {
+function stitchContext(segments: ReadonlyArray<NarrationSegment>, index: number) {
   const previous = segments[index - 1]?.speech;
   const next = segments[index + 1]?.speech;
   return {
@@ -149,7 +149,7 @@ export class ReadAloudService extends Context.Service<
   }
 >()("t3/readAloud/ReadAloudService") {}
 
-export const make = Effect.fn("ReadAloudService.make")(function* (options?: {
+const make = Effect.fn("ReadAloudService.make")(function* (options?: {
   readonly cacheMaxBytes?: number;
 }) {
   const config = yield* ServerConfig.ServerConfig;

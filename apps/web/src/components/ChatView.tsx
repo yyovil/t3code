@@ -293,6 +293,9 @@ import {
   shouldShowThreadErrorBanner,
 } from "./chat/ThreadErrorBanner";
 import { QueuedRunsControl, type QueuedRunsControlHandle } from "./chat/QueuedRunsControl";
+import { ReadAloudBar } from "../readAloud/ReadAloudBar";
+import { readAloudPlayer } from "../readAloud/readAloudPlayer";
+import { useReadAloudThreadScope } from "../readAloud/useReadAloud";
 import { useThreadLinkedPullRequest } from "./pullRequest/useThreadLinkedPullRequest";
 import { useProactivePanels } from "../hooks/useProactivePanels";
 import { useIncrementalTimelineEntries } from "../hooks/useIncrementalTimelineEntries";
@@ -411,6 +414,7 @@ export default function ChatView(props: ChatViewProps) {
   const draftId = routeKind === "draft" ? props.draftId : null;
   const handleNewThread = useNewThreadHandler();
   const routeThreadRef = scopeThreadRef(environmentId, threadId);
+  useReadAloudThreadScope(environmentId, threadId);
   const routeThreadKey = scopedThreadKey(routeThreadRef);
   const currentRouteThreadKeyRef = useRef<string | null>(routeThreadKey);
   useLayoutEffect(() => {
@@ -2738,6 +2742,7 @@ export default function ChatView(props: ChatViewProps) {
         routeKind !== "draft" &&
         composerRef.current?.isCaretAtStart() === true &&
         queuedRunsControlRef.current?.editLatest(event.repeat) === true,
+      "readAloud.stop": () => readAloudPlayer.stopIfActive(),
       "thread.stop": ({ event }) => {
         if (!canInterruptRunningThread) return false;
         if (!event.repeat) void onInterruptStable();
@@ -3529,7 +3534,18 @@ export default function ChatView(props: ChatViewProps) {
                                             : projectCloneSendBlockReason
                               }
                               isPreparingWorktree={isPreparingWorktree && !sendQueuesBehindSetup}
-                              queuedRunsControl={queuedRunsControl}
+                              queuedRunsControl={
+                                <>
+                                  <ReadAloudBar
+                                    stopShortcut={shortcutLabelForCommand(
+                                      keybindings,
+                                      "readAloud.stop",
+                                      { context: { terminalFocus: false } },
+                                    )}
+                                  />
+                                  {queuedRunsControl}
+                                </>
+                              }
                               bannerItems={composerBannerItems}
                               resumeCompactionTokens={resumeCompactionTokens}
                               keepFullHistory={keepFullHistory}

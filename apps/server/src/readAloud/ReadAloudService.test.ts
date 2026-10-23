@@ -132,7 +132,7 @@ const makeHarness = Effect.sync((): Harness => {
 });
 
 const tokenOf = (audioUrl: string) => audioUrl.split("/")[3] ?? "";
-const collect = (stream: Stream.Stream<Uint8Array, unknown>) =>
+const collect = <E>(stream: Stream.Stream<Uint8Array, E>) =>
   Stream.runCollect(stream).pipe(
     Effect.map((chunks) =>
       new TextDecoder().decode(Uint8Array.from([...chunks].flatMap((chunk) => [...chunk]))),

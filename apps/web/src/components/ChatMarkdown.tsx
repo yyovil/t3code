@@ -82,6 +82,7 @@ import type {
   Options as ReactMarkdownOptions,
 } from "react-markdown";
 import ReactMarkdown from "react-markdown";
+import { rehypeReadAloudAnchors } from "@t3tools/shared/readAloudBlocks";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
 import { defaultUrlTransform } from "react-markdown";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
@@ -386,11 +387,13 @@ const CHAT_MARKDOWN_RENDER_REHYPE_PLUGINS = [
   ...CHAT_MARKDOWN_REHYPE_PLUGINS,
   rehypeHeadingIds,
   rehypeTextDirection,
+  rehypeReadAloudAnchors,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
 
 const CHAT_MARKDOWN_LITERAL_HTML_REHYPE_PLUGINS = [
   rehypeHeadingIds,
   rehypeTextDirection,
+  rehypeReadAloudAnchors,
 ] satisfies NonNullable<ReactMarkdownOptions["rehypePlugins"]>;
 
 const NO_MARKDOWN_EDITORS: ReadonlyArray<EditorId> = [];

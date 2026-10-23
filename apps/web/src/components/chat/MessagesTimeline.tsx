@@ -113,6 +113,7 @@ import { V2EventTimelineRow } from "./TimelineV2EventRow";
 import { useTimelinePositionRestore } from "./useTimelinePositionRestore";
 import { useThreadFindPositionReader } from "./useThreadFindPositionReader";
 import { useStableHandoffRuns, useIncrementalTimelineRows, useStableRows } from "./useTimelineRows";
+import { useReadAloudMessageId } from "../../readAloud/useReadAloud";
 
 function timelineListStateFor(identity: string): {
   readonly identity: string;
@@ -665,9 +666,14 @@ const ConversationTimeline = memo(function ConversationTimeline({
     setFullscreenAppRowId((current) => (fullscreen ? rowId : current === rowId ? null : current));
   };
   const alwaysRenderIndices = restoringAlwaysRender?.indices ?? [];
+  // Keep the narrated reply rendered so its highlight can follow the narration.
+  const readAloudMessageId = useReadAloudMessageId();
   const alwaysRenderKeys = [
     ...(citationAlwaysRender?.keys ?? []),
     ...(fullscreenAppRowId === null ? [] : [fullscreenAppRowId]),
+    ...(readAloudMessageId !== null && rows.some((row) => row.id === readAloudMessageId)
+      ? [readAloudMessageId]
+      : []),
   ];
   const alwaysRender =
     alwaysRenderIndices.length === 0 && alwaysRenderKeys.length === 0
