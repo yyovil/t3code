@@ -34,8 +34,9 @@ export function ReadAloudButton({ message }: { readonly message: ChatMessage }) 
   const navigate = useNavigate();
   if (!canNarrate || threadId === null) return null;
 
-  const label = configured
-    ? LABELS[status]
+  const label = LABELS[status];
+  const tooltip = configured
+    ? label
     : "Add an ElevenLabs API key in Settings to read responses aloud";
   const Icon = status === "playing" ? PauseIcon : status === "paused" ? PlayIcon : Volume2Icon;
 
@@ -52,7 +53,11 @@ export function ReadAloudButton({ message }: { readonly message: ChatMessage }) 
             aria-pressed={status === "idle" ? undefined : status === "playing"}
             onClick={() => {
               if (!configured) {
-                void navigate({ to: "/settings/integrations", hash: "read-aloud" });
+                void navigate({
+                  to: "/settings/integrations",
+                  search: { machine: environmentId },
+                  hash: "read-aloud",
+                });
                 return;
               }
               readAloudPlayer.toggle(
@@ -65,7 +70,7 @@ export function ReadAloudButton({ message }: { readonly message: ChatMessage }) 
       >
         <Icon className={status === "idle" ? "size-3" : "size-3 text-primary"} />
       </TooltipTrigger>
-      <TooltipPopup side="top">{label}</TooltipPopup>
+      <TooltipPopup side="top">{tooltip}</TooltipPopup>
     </Tooltip>
   );
 }

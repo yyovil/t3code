@@ -27,13 +27,22 @@ export function useReadAloudMessageId(): MessageId | null {
   });
 }
 
-/** Ends the narration when the thread on screen changes or the chat closes. */
-export function useReadAloudThreadScope(
-  environmentId: EnvironmentId | null,
-  threadId: ThreadId | null,
-) {
+/**
+ * Ends the narration when the thread on screen changes or the chat closes.
+ * A component rather than a hook: a hook call in the middle of ChatView splits
+ * the React Compiler's memo scopes around it, and ChatView's values then
+ * change identity on every render and loop.
+ */
+export function ReadAloudThreadScope({
+  environmentId,
+  threadId,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
+}) {
   useEffect(() => {
     readAloudPlayer.stopUnlessThread(environmentId, threadId);
     return () => readAloudPlayer.stopUnlessThread(null, null);
   }, [environmentId, threadId]);
+  return null;
 }
