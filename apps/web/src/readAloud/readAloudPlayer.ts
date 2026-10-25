@@ -2,7 +2,7 @@ import { resolveAssetUrl } from "@t3tools/client-runtime/state/assets";
 import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
-  MessageId,
+  ReadAloudPrepareInput,
   ReadAloudSegment,
   ReadAloudSpeed,
   ThreadId,
@@ -20,16 +20,20 @@ import { readPreparedConnection } from "../state/session";
 import {
   highlightedOffsets,
   highlightStyleSheet,
-  messageRootSelector,
+  readAloudKey,
+  readAloudRootSelector,
   splitSentences,
   spokenSentenceIndex,
+  type ReadAloudSource,
 } from "./readAloud.logic";
 import { readAloudPrepare } from "./readAloudCommands";
 
 export interface ReadAloudTarget {
   readonly environmentId: EnvironmentId;
+  /** The thread on screen; narration ends when it changes. */
   readonly threadId: ThreadId;
-  readonly messageId: MessageId;
+  readonly source: ReadAloudSource;
+  /** The markdown as rendered, which the highlight follows. */
   readonly text: string;
 }
 
@@ -111,17 +115,17 @@ class ReadAloudPlayer {
     this.setState({ ...this.state, ...patch });
   }
 
-  isTarget(messageId: MessageId): boolean {
-    return this.state.status !== "idle" && this.state.target.messageId === messageId;
+  isTarget(key: string): boolean {
+    return this.state.status !== "idle" && readAloudKey(this.state.target.source) === key;
   }
 
   /**
    * Starts a narration, or pauses and resumes the one already playing this
-   * message. Call it from the user's tap: it unlocks audio before anything awaits.
+   * source. Call it from the user's tap: it unlocks audio before anything awaits.
    */
   toggle(target: ReadAloudTarget, rate: ReadAloudSpeed) {
     this.unlockAudio();
-    if (this.isTarget(target.messageId)) {
+    if (this.isTarget(readAloudKey(target.source))) {
       if (this.state.status === "active") this.setPaused(!this.state.paused);
       return;
     }
@@ -217,7 +221,7 @@ class ReadAloudPlayer {
       readAloudPrepare,
       {
         environmentId: target.environmentId,
-        input: { threadId: target.threadId, messageId: target.messageId },
+        input: prepareInput(target),
       },
       { reportFailure: false },
     );
@@ -442,7 +446,8 @@ class ReadAloudPlayer {
       if (this.styleElement) this.styleElement.textContent = "";
       return;
     }
-    const root = document.querySelector(messageRootSelector(session.target.messageId));
+    const rootSelector = readAloudRootSelector(session.target.source);
+    const root = document.querySelector(rootSelector);
     const rendered = root
       ? [...root.querySelectorAll(`[${READ_ALOUD_OFFSET_ATTRIBUTE}]`)].map((element) =>
           Number(element.getAttribute(READ_ALOUD_OFFSET_ATTRIBUTE)),
@@ -455,14 +460,23 @@ class ReadAloudPlayer {
       rendered,
     );
     this.styleElement ??= document.head.appendChild(document.createElement("style"));
-    this.styleElement.textContent = highlightStyleSheet(session.target.messageId, offsets);
+    this.styleElement.textContent = highlightStyleSheet(rootSelector, offsets);
     if (!scroll || !root || offsets.length === 0) return;
     const first = root.querySelector(`[${READ_ALOUD_OFFSET_ATTRIBUTE}="${offsets[0]}"]`);
     if (first instanceof HTMLElement) scrollIntoViewIfHidden(first);
   }
 }
 
+function prepareInput(target: ReadAloudTarget): ReadAloudPrepareInput {
+  return target.source.kind === "message"
+    ? { threadId: target.threadId, messageId: target.source.messageId }
+    : { path: target.source.path, text: target.text };
+}
+
 function narrationTitle(target: ReadAloudTarget): string {
+  if (target.source.kind === "document") {
+    return target.source.path.split("/").at(-1) || target.source.path;
+  }
   const title = readThreadShell({
     environmentId: target.environmentId,
     threadId: target.threadId,

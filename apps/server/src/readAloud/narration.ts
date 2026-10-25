@@ -1,5 +1,8 @@
 import type { MessageId, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
-import type { NarrationSegmentDraft } from "@t3tools/provider-core/server/textGeneration";
+import type {
+  NarrationSegmentDraft,
+  NarrationSubject,
+} from "@t3tools/provider-core/server/textGeneration";
 
 export interface NarrationSegment {
   readonly firstBlock: number;
@@ -61,10 +64,7 @@ export function repairNarrationSegments(
 
 export interface NarrationContext {
   readonly text: string;
-  readonly threadTitle: string;
-  readonly userPrompt: string;
-  readonly previousExchange?: { readonly user: string; readonly assistant: string };
-  readonly changedFiles: ReadonlyArray<string>;
+  readonly subject: NarrationSubject;
 }
 
 type VisibleItem = OrchestrationV2ThreadProjection["visibleTurnItems"][number]["item"];
@@ -122,11 +122,14 @@ export function narrationContext(
 
   return {
     text: message.text,
-    threadTitle: projection.thread.title,
-    userPrompt,
-    ...(previousUser && previousAssistant
-      ? { previousExchange: { user: previousUser.text, assistant: previousAssistant.text } }
-      : {}),
-    changedFiles,
+    subject: {
+      kind: "reply",
+      threadTitle: projection.thread.title,
+      userPrompt,
+      ...(previousUser && previousAssistant
+        ? { previousExchange: { user: previousUser.text, assistant: previousAssistant.text } }
+        : {}),
+      changedFiles,
+    },
   };
 }

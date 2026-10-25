@@ -1,4 +1,5 @@
 import {
+  ReadAloudDocumentEmptyError,
   ReadAloudMessageNotFoundError,
   ReadAloudNotConfiguredError,
   TextGenerationError,
@@ -40,7 +41,12 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ElevenLabs from "./elevenLabs.ts";
-import { narrationContext, repairNarrationSegments, type NarrationSegment } from "./narration.ts";
+import {
+  narrationContext,
+  repairNarrationSegments,
+  type NarrationContext,
+  type NarrationSegment,
+} from "./narration.ts";
 
 export const READ_ALOUD_ROUTE_PREFIX = "/api/read-aloud";
 /** Bump when the narration prompt or block split changes, so cached narrations regenerate. */
@@ -87,6 +93,8 @@ const encodeKeyParts = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 /** Keyed on everything that changes what the listener hears. */
 export const narrationCacheKey = Effect.fn("ReadAloudService.narrationCacheKey")(function* (input: {
   readonly text: string;
+  /** Set for a markdown file: its path is part of the prompt. */
+  readonly documentPath?: string | undefined;
   readonly voiceId: string;
   readonly ttsModel: string;
   readonly modelSelection: ModelSelection;
@@ -103,6 +111,7 @@ export const narrationCacheKey = Effect.fn("ReadAloudService.narrationCacheKey")
         input.modelSelection.instanceId,
         input.modelSelection.model,
         input.modelSelection.options ?? [],
+        ...(input.documentPath === undefined ? [] : ["document", input.documentPath]),
       ]),
     ),
   );
@@ -242,24 +251,43 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
     return `${READ_ALOUD_ROUTE_PREFIX}/${payload}.${signPayload(payload, secret)}/${segment}.mp3`;
   });
 
+  const resolveContext = Effect.fn("ReadAloudService.resolveContext")(function* (
+    input: ReadAloudPrepareInput,
+  ) {
+    if ("path" in input) {
+      yield* Effect.annotateCurrentSpan({ document: true });
+      return {
+        text: input.text,
+        subject: { kind: "document", path: input.path },
+      } satisfies NarrationContext;
+    }
+    yield* Effect.annotateCurrentSpan({ threadId: input.threadId });
+    const projection = yield* projections
+      .getThreadProjection(input.threadId)
+      .pipe(Effect.mapError(() => new ReadAloudMessageNotFoundError(input)));
+    const context = narrationContext(projection, input.messageId);
+    if (!context) return yield* new ReadAloudMessageNotFoundError(input);
+    return context;
+  });
+
   const prepare: ReadAloudService["Service"]["prepare"] = Effect.fn("ReadAloudService.prepare")(
     function* (input) {
-      yield* Effect.annotateCurrentSpan({ threadId: input.threadId });
       yield* apiKey;
       const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
-      const projection = yield* projections
-        .getThreadProjection(input.threadId)
-        .pipe(Effect.mapError(() => new ReadAloudMessageNotFoundError(input)));
-      const context = narrationContext(projection, input.messageId);
-      if (!context) return yield* new ReadAloudMessageNotFoundError(input);
+      const context = yield* resolveContext(input);
       const blocks = splitReadAloudBlocks(context.text);
-      if (blocks.length === 0) return yield* new ReadAloudMessageNotFoundError(input);
+      if (blocks.length === 0) {
+        return yield* "path" in input
+          ? new ReadAloudDocumentEmptyError({ path: input.path })
+          : new ReadAloudMessageNotFoundError(input);
+      }
 
       const providers = yield* providerRegistry.getProviders;
       const modelSelection = resolveReadAloudModelSelection(settings, providers);
       const { voiceId, ttsModel } = settings.readAloud;
       const key = yield* narrationCacheKey({
         text: context.text,
+        documentPath: context.subject.kind === "document" ? context.subject.path : undefined,
         voiceId,
         ttsModel,
         modelSelection,
@@ -278,10 +306,7 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
                 kind: block.kind,
                 source: block.source,
               })),
-              threadTitle: context.threadTitle,
-              userPrompt: context.userPrompt,
-              previousExchange: context.previousExchange,
-              changedFiles: context.changedFiles,
+              subject: context.subject,
               modelSelection,
             });
             const segments = repairNarrationSegments(blocks.length, generated.segments);

@@ -52,6 +52,7 @@ import { useEnvironmentProviders } from "../state/environments";
 import { useEnvironmentQuery } from "../state/query";
 import { EMPTY_SERVER_PROVIDERS } from "../state/server";
 import { readAloudVoices } from "./readAloudCommands";
+import { VoicePreviewButton, VoicePreviewScope } from "./VoicePreviewButton";
 
 export function ReadAloudSettingsSection() {
   const { environment, scope } = useSettingsScope();
@@ -151,6 +152,10 @@ function ReadAloudSettingsForm() {
         }
         control={
           <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto">
+            <VoicePreviewScope />
+            {listedVoice?.previewUrl ? (
+              <VoicePreviewButton name={listedVoice.name} previewUrl={listedVoice.previewUrl} />
+            ) : null}
             {voices.data && voices.data.voices.length > 0 ? (
               <Select
                 value={listedVoice ? listedVoice.voiceId : null}
@@ -171,7 +176,14 @@ function ReadAloudSettingsForm() {
                 <SelectPopup align="end" alignItemWithTrigger={false}>
                   {voices.data.voices.map((voice) => (
                     <SelectItem key={voice.voiceId} hideIndicator value={voice.voiceId}>
-                      {voice.name}
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        {voice.previewUrl ? (
+                          <VoicePreviewButton name={voice.name} previewUrl={voice.previewUrl} />
+                        ) : (
+                          <span aria-hidden className="size-6 shrink-0" />
+                        )}
+                        <span className="min-w-0 truncate">{voice.name}</span>
+                      </span>
                     </SelectItem>
                   ))}
                 </SelectPopup>

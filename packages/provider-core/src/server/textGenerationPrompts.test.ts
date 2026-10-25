@@ -27,11 +27,14 @@ describe("buildNarrationPrompt", () => {
       { index: 0, kind: "paragraph", source: "Retries now back off." },
       { index: 1, kind: "code", source: "```ts\nretry({ attempts: 5 })\n```" },
     ],
-    threadTitle: "Flaky uploads",
-    userPrompt: "why not retry?",
-    previousExchange: { user: "Why do uploads fail?", assistant: "They time out." },
-    changedFiles: ["src/upload.ts"],
-  };
+    subject: {
+      kind: "reply",
+      threadTitle: "Flaky uploads",
+      userPrompt: "why not retry?",
+      previousExchange: { user: "Why do uploads fail?", assistant: "They time out." },
+      changedFiles: ["src/upload.ts"],
+    },
+  } as const;
 
   it("gives the model every block by index, with the conversation around it", () => {
     const { prompt } = buildNarrationPrompt(input);
@@ -40,6 +43,17 @@ describe("buildNarrationPrompt", () => {
     expect(prompt).toContain("<user_message>\nwhy not retry?\n</user_message>");
     expect(prompt).toContain("<previous_user_message>\nWhy do uploads fail?");
     expect(prompt).toContain("- src/upload.ts");
+  });
+
+  it("frames a document by its path instead of a conversation", () => {
+    const { prompt } = buildNarrationPrompt({
+      blocks: input.blocks,
+      subject: { kind: "document", path: "docs/user/read-aloud.md" },
+    });
+    expect(prompt).toContain("markdown document");
+    expect(prompt).toContain("<document_path>docs/user/read-aloud.md</document_path>");
+    expect(prompt).toContain("The document to explain, as 2 blocks:");
+    expect(prompt).not.toContain("<user_message>");
   });
 
   effectIt.effect("decodes segments from a reply wrapped in prose", () =>

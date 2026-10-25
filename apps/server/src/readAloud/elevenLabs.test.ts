@@ -77,7 +77,14 @@ describe("listVoices", () => {
             Response.json(
               token === null
                 ? {
-                    voices: [{ voice_id: "a", name: "Ada", category: "premade" }],
+                    voices: [
+                      {
+                        voice_id: "a",
+                        name: "Ada",
+                        category: "premade",
+                        preview_url: "https://cdn.test/ada.mp3",
+                      },
+                    ],
                     has_more: true,
                     next_page_token: "page-2",
                   }
@@ -90,7 +97,7 @@ describe("listVoices", () => {
         Effect.provideService(HttpClient.HttpClient, client),
       );
       expect(voices).toEqual([
-        { voiceId: "a", name: "Ada", category: "premade" },
+        { voiceId: "a", name: "Ada", category: "premade", previewUrl: "https://cdn.test/ada.mp3" },
         { voiceId: "b", name: "b" },
       ]);
       expect(seen).toEqual([

@@ -1,18 +1,16 @@
-import { useAtomValue } from "@effect/atom-react";
-import { useNavigate } from "@tanstack/react-router";
 import { PauseIcon, PlayIcon, Volume2Icon } from "lucide-react";
 import { use } from "react";
 
 import { Button } from "../components/ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { TimelineRowCtx } from "../components/chat/timelineRowContext";
-import { useClientSettings, useEnvironmentSettings } from "../hooks/useSettings";
+import { useClientSettings } from "../hooks/useSettings";
 import type { ChatMessage } from "../types";
-import { readAloudPrepare } from "./readAloudCommands";
 import { readAloudPlayer } from "./readAloudPlayer";
-import { useReadAloudMessageStatus } from "./useReadAloud";
+import { readAloudKey } from "./readAloud.logic";
+import { useReadAloudAvailability, useReadAloudStatus } from "./useReadAloud";
 
-const LABELS = {
+export const READ_ALOUD_LABELS = {
   idle: "Read aloud",
   preparing: "Preparing narration…",
   playing: "Pause reading",
@@ -24,17 +22,12 @@ export function ReadAloudButton({ message }: { readonly message: ChatMessage }) 
   const ctx = use(TimelineRowCtx);
   const environmentId = ctx.activeThreadEnvironmentId;
   const threadId = ctx.threadRef?.threadId ?? null;
-  const status = useReadAloudMessageStatus(message.id);
+  const status = useReadAloudStatus(readAloudKey({ kind: "message", messageId: message.id }));
   const speed = useClientSettings((settings) => settings.readAloudSpeed);
-  const configured = useEnvironmentSettings(
-    environmentId,
-    (settings) => settings.readAloud.elevenLabsApiKey.length > 0,
-  );
-  const canNarrate = useAtomValue(readAloudPrepare.permissionAtom(environmentId));
-  const navigate = useNavigate();
+  const { canNarrate, configured, openSettings } = useReadAloudAvailability(environmentId);
   if (!canNarrate || threadId === null) return null;
 
-  const label = LABELS[status];
+  const label = READ_ALOUD_LABELS[status];
   const tooltip = configured
     ? label
     : "Add an ElevenLabs API key in Settings to read responses aloud";
@@ -53,15 +46,16 @@ export function ReadAloudButton({ message }: { readonly message: ChatMessage }) 
             aria-pressed={status === "idle" ? undefined : status === "playing"}
             onClick={() => {
               if (!configured) {
-                void navigate({
-                  to: "/settings/integrations",
-                  search: { machine: environmentId },
-                  hash: "read-aloud",
-                });
+                openSettings();
                 return;
               }
               readAloudPlayer.toggle(
-                { environmentId, threadId, messageId: message.id, text: message.text },
+                {
+                  environmentId,
+                  threadId,
+                  source: { kind: "message", messageId: message.id },
+                  text: message.text,
+                },
                 speed,
               );
             }}

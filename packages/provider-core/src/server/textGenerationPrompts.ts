@@ -4,7 +4,7 @@ import { limitTitleMessage } from "./threadTitleContext.ts";
 import type { BranchNamingOptions, ChatAttachment } from "@t3tools/contracts";
 
 import { limitSection } from "./textGenerationUtils.ts";
-import type { NarrationBlock, ReviewGuideStackLayer } from "./textGeneration.ts";
+import type { NarrationBlock, NarrationSubject, ReviewGuideStackLayer } from "./textGeneration.ts";
 import type { TextGenerationPolicy } from "@t3tools/provider-core/server/textGenerationPolicy";
 
 const EARLIER_CONTENT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n";
@@ -466,21 +466,26 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 
 export interface NarrationPromptInput {
   blocks: ReadonlyArray<NarrationBlock>;
-  threadTitle: string;
-  userPrompt: string;
-  previousExchange?: { readonly user: string; readonly assistant: string } | undefined;
-  changedFiles: ReadonlyArray<string>;
+  subject: NarrationSubject;
 }
 
-const NARRATION_PROMPT = `You turn a coding agent's written reply into a short spoken explanation. The user would rather listen than read. A voice reads your words aloud, and the reply's blocks are highlighted on screen in step with you.
+const NARRATION_INTRO = {
+  reply: `You turn a coding agent's written reply into a short spoken explanation. The user would rather listen than read. A voice reads your words aloud, and the reply's blocks are highlighted on screen in step with you.
 
-Talk like a teammate explaining the reply on a call:
-- Plain English and short sentences. Say what matters first.
+Talk like a teammate explaining the reply on a call:`,
+  document: `You turn a markdown document from a code repository into a short spoken explanation. The user would rather listen than read. A voice reads your words aloud, and the document's blocks are highlighted on screen in step with you.
+
+Talk like a teammate walking the user through the document on a call:`,
+} as const;
+
+const NARRATION_RULES = (
+  noun: "reply" | "document",
+) => `- Plain English and short sentences. Say what matters first.
 - Explain jargon in a few words the first time it comes up.
-- Tie the explanation back to what the user asked.
+${noun === "reply" ? "- Tie the explanation back to what the user asked." : "- Keep the document's structure: say when a new section starts and what it is about."}
 - Never read code, file paths, commands, hashes, URLs, version strings, or IDs aloud. Say what they are or what they do: "the settings file", "a one-line change to the retry loop", "the commit that fixed the build".
 - Summarize tables and long lists instead of reading them row by row.
-- Do not invent facts that are not in the reply. Do not add greetings, sign-offs, or "this reply says".
+- Do not invent facts that are not in the ${noun}. Do not add greetings, sign-offs, or "this ${noun} says".
 - Write words to be spoken: no markdown, bullets, emoji, or parentheses. Spell out symbols ("arrow", "equals") only if you must mention them.
 
 Return a JSON object with one key, segments: the spoken explanation in reading order. Each segment is {firstBlock, lastBlock, speech}:
@@ -508,41 +513,52 @@ function narrationBlocks(blocks: ReadonlyArray<NarrationBlock>): string {
     .join("\n");
 }
 
-export function buildNarrationPrompt(input: NarrationPromptInput) {
-  const changedFiles = input.changedFiles.slice(0, 40);
-  const prompt = [
-    NARRATION_PROMPT,
-    "",
-    `<thread_title>${input.threadTitle}</thread_title>`,
-    ...(input.previousExchange
+function narrationReplyContext(subject: Extract<NarrationSubject, { kind: "reply" }>) {
+  const changedFiles = subject.changedFiles.slice(0, 40);
+  return [
+    `<thread_title>${subject.threadTitle}</thread_title>`,
+    ...(subject.previousExchange
       ? [
           "",
           "The exchange before this one:",
           "<previous_user_message>",
-          limitSection(input.previousExchange.user, 2_000),
+          limitSection(subject.previousExchange.user, 2_000),
           "</previous_user_message>",
           "<previous_reply>",
-          limitSection(input.previousExchange.assistant, 4_000),
+          limitSection(subject.previousExchange.assistant, 4_000),
           "</previous_reply>",
         ]
       : []),
     "",
     "What the user asked:",
     "<user_message>",
-    limitSection(input.userPrompt.trim() || "(no text)", 6_000),
+    limitSection(subject.userPrompt.trim() || "(no text)", 6_000),
     "</user_message>",
     ...(changedFiles.length > 0
       ? [
           "",
           "Files the agent changed while writing the reply:",
           ...changedFiles.map((file) => `- ${file}`),
-          ...(input.changedFiles.length > changedFiles.length
-            ? [`- and ${input.changedFiles.length - changedFiles.length} more`]
+          ...(subject.changedFiles.length > changedFiles.length
+            ? [`- and ${subject.changedFiles.length - changedFiles.length} more`]
             : []),
         ]
       : []),
+  ];
+}
+
+export function buildNarrationPrompt(input: NarrationPromptInput) {
+  const { subject } = input;
+  const noun = subject.kind;
+  const prompt = [
+    NARRATION_INTRO[noun],
+    NARRATION_RULES(noun),
     "",
-    `The reply to explain, as ${input.blocks.length} blocks:`,
+    ...(subject.kind === "reply"
+      ? narrationReplyContext(subject)
+      : [`<document_path>${limitSection(subject.path, 500)}</document_path>`]),
+    "",
+    `The ${noun} to explain, as ${input.blocks.length} blocks:`,
     narrationBlocks(input.blocks),
   ].join("\n");
 

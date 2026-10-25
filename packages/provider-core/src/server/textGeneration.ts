@@ -102,15 +102,27 @@ export interface NarrationBlock {
   readonly source: string;
 }
 
+/** What is being narrated, and what a listener needs to follow it. */
+export type NarrationSubject =
+  | {
+      readonly kind: "reply";
+      readonly threadTitle: string;
+      /** The user message this response answers. */
+      readonly userPrompt: string;
+      /** The exchange before it, since follow-ups like "why not?" only make sense with it. */
+      readonly previousExchange?: { readonly user: string; readonly assistant: string } | undefined;
+      readonly changedFiles: ReadonlyArray<string>;
+    }
+  | {
+      readonly kind: "document";
+      /** Workspace-relative path of the markdown file. */
+      readonly path: string;
+    };
+
 export interface NarrationGenerationInput {
   cwd: string;
   blocks: ReadonlyArray<NarrationBlock>;
-  threadTitle: string;
-  /** The user message this response answers. */
-  userPrompt: string;
-  /** The exchange before it, since follow-ups like "why not?" only make sense with it. */
-  previousExchange?: { readonly user: string; readonly assistant: string } | undefined;
-  changedFiles: ReadonlyArray<string>;
+  subject: NarrationSubject;
   modelSelection: ModelSelection;
 }
 

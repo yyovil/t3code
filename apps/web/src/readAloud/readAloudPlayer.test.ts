@@ -9,10 +9,13 @@ function deferred() {
   return { promise, resolve };
 }
 
-const mocks = { prepare: deferred() };
+const mocks = { prepare: deferred(), prepareInputs: [] as Array<unknown> };
 
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
-  runAtomCommand: () => mocks.prepare.promise,
+  runAtomCommand: (_registry: unknown, _command: unknown, request: { input: unknown }) => {
+    mocks.prepareInputs.push(request.input);
+    return mocks.prepare.promise;
+  },
   squashAtomCommandFailure: () => new Error("failed"),
 }));
 vi.mock("../state/session", () => ({
@@ -87,11 +90,12 @@ function createMediaSession() {
 
 const environmentId = EnvironmentId.make("env-1");
 const threadId = ThreadId.make("thread-1");
+const text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.";
 const target = (id: string) => ({
   environmentId,
   threadId,
-  messageId: MessageId.make(id),
-  text: "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
+  source: { kind: "message", messageId: MessageId.make(id) } as const,
+  text,
 });
 const segments = [0, 1, 2].map((index) => ({
   firstBlock: index,
@@ -106,6 +110,7 @@ async function setup() {
   FakeAudio.log = [];
   FakeAudio.instances = [];
   mocks.prepare = deferred();
+  mocks.prepareInputs = [];
   const mediaSession = createMediaSession();
   const audioSession = { type: "auto" };
   const fetch = vi.fn((_url: string) =>
@@ -191,7 +196,7 @@ describe("readAloudPlayer", () => {
     expect(FakeAudio.log.slice(-2)).toEqual([`src ${url(0)}`, "play"]);
     expect(readAloudPlayer.getSnapshot()).toMatchObject({
       status: "active",
-      target: { messageId: "message-2" },
+      target: { source: { messageId: "message-2" } },
     });
   });
 
@@ -225,5 +230,17 @@ describe("readAloudPlayer", () => {
     expect(mediaSession.metadata).toBeNull();
     expect(mediaSession.playbackState).toBe("none");
     expect([...mediaSession.handlers.values()].every((handler) => handler === null)).toBe(true);
+  });
+
+  it("narrates a markdown file from the text on screen", async () => {
+    const { readAloudPlayer, mediaSession, prepared } = await setup();
+    readAloudPlayer.toggle(
+      { environmentId, threadId, source: { kind: "document", path: "docs/user/guide.md" }, text },
+      1,
+    );
+    await prepared();
+    expect(mocks.prepareInputs).toEqual([{ path: "docs/user/guide.md", text }]);
+    expect(readAloudPlayer.isTarget("document:docs/user/guide.md")).toBe(true);
+    expect(mediaSession.metadata).toMatchObject({ title: "guide.md" });
   });
 });

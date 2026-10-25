@@ -100,17 +100,20 @@ describe("narrationContext", () => {
   it("collects the request, the exchange before it, and the run's files", () => {
     expect(narrationContext(projection(items), MessageId.make("a2"))).toEqual({
       text: "Retries now back off.",
-      threadTitle: "Retry flaky uploads",
-      userPrompt: "why not retry?",
-      previousExchange: { user: "Why do uploads fail?", assistant: "They time out." },
-      changedFiles: ["src/upload.ts", "src/retry.ts"],
+      subject: {
+        kind: "reply",
+        threadTitle: "Retry flaky uploads",
+        userPrompt: "why not retry?",
+        previousExchange: { user: "Why do uploads fail?", assistant: "They time out." },
+        changedFiles: ["src/upload.ts", "src/retry.ts"],
+      },
     });
   });
 
   it("has no previous exchange for the first reply", () => {
     const context = narrationContext(projection(items), MessageId.make("a1"));
-    expect(context?.userPrompt).toBe("Why do uploads fail?");
-    expect(context?.previousExchange).toBeUndefined();
+    expect(context?.subject).toMatchObject({ userPrompt: "Why do uploads fail?" });
+    expect(context?.subject).not.toHaveProperty("previousExchange");
   });
 
   it("skips missing, streaming, and empty messages", () => {

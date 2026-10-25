@@ -156,6 +156,7 @@ describe("narrationCacheKey", () => {
           { ...base, text: `${reply}!` },
           { ...base, voiceId: "voice-b" },
           { ...base, ttsModel: "eleven_v4" },
+          { ...base, documentPath: "docs/fix.md" },
           { ...base, modelSelection: { ...base.modelSelection, model: "sonnet" } },
           {
             ...base,
@@ -195,8 +196,11 @@ describe("ReadAloudService", () => {
 
         expect(harness.narrations).toHaveLength(1);
         const [narration] = harness.narrations;
-        expect(narration?.userPrompt).toBe("make uploads retry");
-        expect(narration?.threadTitle).toBe("Flaky uploads");
+        expect(narration?.subject).toMatchObject({
+          kind: "reply",
+          userPrompt: "make uploads retry",
+          threadTitle: "Flaky uploads",
+        });
         expect(narration?.blocks.map((block) => block.kind)).toEqual([
           "heading",
           "paragraph",
@@ -211,6 +215,32 @@ describe("ReadAloudService", () => {
           first.segments.map((segment) => segment.speech),
         );
         expect(first.segments[0]?.audioUrl).toMatch(/^\/api\/read-aloud\/[\w-]+\.[\w-]+\/0\.mp3$/);
+      }).pipe(Effect.provide(makeLayer(harness)));
+    }),
+  );
+
+  it.effect("narrates a markdown document from the text the client shows", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      yield* Effect.gen(function* () {
+        const service = yield* ReadAloudService.ReadAloudService;
+        const path = "docs/uploads.md";
+        const { segments } = yield* service.prepare({ path, text: reply });
+        yield* service.prepare({ path, text: reply });
+        // The same text as a reply is a different prompt, so it narrates again.
+        yield* service.prepare({ threadId, messageId });
+
+        expect(harness.narrations.map((narration) => narration.subject)).toEqual([
+          { kind: "document", path },
+          expect.objectContaining({ kind: "reply" }),
+        ]);
+        expect(segments.map((segment) => segment.speech)).toEqual([
+          "Uploads now retry.",
+          "They back off and give up after five.",
+        ]);
+
+        const error = yield* service.prepare({ path, text: "  \n" }).pipe(Effect.flip);
+        expect(error._tag).toBe("ReadAloudDocumentEmptyError");
       }).pipe(Effect.provide(makeLayer(harness)));
     }),
   );

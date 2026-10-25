@@ -46,6 +46,9 @@ import { useEffect, useRef, useState } from "react";
 import { isBrowserPreviewFile, openFileInPreview } from "~/browser/openFileInPreview";
 import { useAssetUrlRefresh, useAssetUrlState } from "~/assets/assetUrls";
 import { OpenInPicker } from "~/components/chat/OpenInPicker";
+import { shortcutLabelForCommand } from "~/keybindings";
+import { ReadAloudDocumentBar } from "~/readAloud/ReadAloudBar";
+import { ReadAloudDocumentButton } from "~/readAloud/ReadAloudDocumentButton";
 import { MediaVideoPlayer } from "~/components/media/MediaVideoPlayer";
 import { MediaActions, type MediaActionSource } from "~/components/media/MediaActions";
 import { MorphIcon } from "~/components/MorphIcon";
@@ -1250,6 +1253,17 @@ export default function FilePreviewPanel({
               />
             </div>
           </ScrollArea>
+          {isMarkdown &&
+          relativePath &&
+          attachment === undefined &&
+          file.data?.truncated === false ? (
+            <ReadAloudDocumentButton
+              environmentId={environmentId}
+              threadRef={threadRef}
+              path={relativePath}
+              text={file.data.contents}
+            />
+          ) : null}
           {absolutePath &&
           (environmentId === primaryEnvironmentId || remoteOpenState.mode !== "local-exec") ? (
             <OpenInPicker
@@ -1324,8 +1338,17 @@ export default function FilePreviewPanel({
       ) : null}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <div
-          className={cn("min-w-0 flex-1 flex-col overflow-hidden", previewPath ? "flex" : "hidden")}
+          className={cn(
+            "relative min-w-0 flex-1 flex-col overflow-hidden",
+            previewPath ? "flex" : "hidden",
+          )}
         >
+          <ReadAloudDocumentBar
+            path={isMarkdown && attachment === undefined ? relativePath : null}
+            stopShortcut={shortcutLabelForCommand(keybindings, "readAloud.stop", {
+              context: { terminalFocus: false },
+            })}
+          />
           {isFolder ? null : relativePath && attachment ? (
             <AttachmentFilePreview
               key={`${environmentId}:${attachment.id}`}

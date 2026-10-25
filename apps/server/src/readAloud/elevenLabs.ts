@@ -80,6 +80,7 @@ const VoicesPage = Schema.Struct({
       voice_id: Schema.String,
       name: Schema.optional(Schema.NullOr(Schema.String)),
       category: Schema.optional(Schema.NullOr(Schema.String)),
+      preview_url: Schema.optional(Schema.NullOr(Schema.String)),
     }),
   ),
   has_more: Schema.optional(Schema.Boolean),
@@ -116,6 +117,7 @@ export const listVoices = Effect.fn("ElevenLabs.listVoices")(function* (apiKey: 
         voiceId: voice.voice_id,
         name: voice.name?.trim() || voice.voice_id,
         ...(voice.category ? { category: voice.category } : {}),
+        ...(voice.preview_url ? { previewUrl: voice.preview_url } : {}),
       });
     }
     if (!body.has_more || !body.next_page_token) break;

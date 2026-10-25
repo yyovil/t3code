@@ -35,10 +35,27 @@ export const READ_ALOUD_TTS_MODELS: ReadonlyArray<{
   { id: "eleven_v4", label: "v4", description: "Most expressive; slowest to start." },
 ];
 
-export const ReadAloudPrepareInput = Schema.Struct({
+/** Longer documents would not fit the narration prompt's budget. */
+export const READ_ALOUD_DOCUMENT_MAX_CHARS = 60_000;
+
+export const ReadAloudPrepareMessageInput = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
 });
+
+/**
+ * A markdown file as the client renders it. The client sends the text it shows
+ * so the narration's blocks line up with what is on screen.
+ */
+export const ReadAloudPrepareDocumentInput = Schema.Struct({
+  path: Schema.String.check(Schema.isMaxLength(1_000)),
+  text: Schema.String.check(Schema.isMaxLength(READ_ALOUD_DOCUMENT_MAX_CHARS)),
+});
+
+export const ReadAloudPrepareInput = Schema.Union([
+  ReadAloudPrepareMessageInput,
+  ReadAloudPrepareDocumentInput,
+]);
 export type ReadAloudPrepareInput = typeof ReadAloudPrepareInput.Type;
 
 /**
@@ -63,6 +80,8 @@ export const ReadAloudVoice = Schema.Struct({
   voiceId: Schema.String,
   name: Schema.String,
   category: Schema.optional(Schema.String),
+  /** ElevenLabs' public sample clip; playing it spends no credits. */
+  previewUrl: Schema.optional(Schema.String),
 });
 export type ReadAloudVoice = typeof ReadAloudVoice.Type;
 
@@ -103,9 +122,19 @@ export class ReadAloudVoicesError extends Schema.TaggedError<ReadAloudVoicesErro
   }
 }
 
+export class ReadAloudDocumentEmptyError extends Schema.TaggedError<ReadAloudDocumentEmptyError>()(
+  "ReadAloudDocumentEmptyError",
+  { path: Schema.String },
+) {
+  override get message(): string {
+    return "This file has nothing to read aloud.";
+  }
+}
+
 export const ReadAloudPrepareError = Schema.Union([
   ReadAloudNotConfiguredError,
   ReadAloudMessageNotFoundError,
+  ReadAloudDocumentEmptyError,
   TextGenerationError,
 ]);
 export type ReadAloudPrepareError = typeof ReadAloudPrepareError.Type;

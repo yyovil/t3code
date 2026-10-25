@@ -1,4 +1,4 @@
-import { READ_ALOUD_SPEEDS, type ReadAloudSpeed } from "@t3tools/contracts";
+import { READ_ALOUD_SPEEDS, type MessageId, type ReadAloudSpeed } from "@t3tools/contracts";
 import { READ_ALOUD_OFFSET_ATTRIBUTE, type ReadAloudBlock } from "@t3tools/shared/readAloudBlocks";
 
 const SENTENCE_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "sentence" });
@@ -64,17 +64,30 @@ export function highlightedOffsets(
   return [...offsets];
 }
 
-/** The message root that wraps a rendered reply in the timeline. */
-export function messageRootSelector(messageId: string): string {
-  return `[data-assistant-citation-source="${CSS.escape(messageId)}"]`;
+/** What a narration reads: an assistant reply, or a markdown file in the file preview. */
+export type ReadAloudSource =
+  | { readonly kind: "message"; readonly messageId: MessageId }
+  | { readonly kind: "document"; readonly path: string };
+
+/** Identifies a narration across the button that starts it and the bar that drives it. */
+export function readAloudKey(source: ReadAloudSource): string {
+  return source.kind === "message" ? `message:${source.messageId}` : `document:${source.path}`;
+}
+
+export const READ_ALOUD_DOCUMENT_ATTRIBUTE = "data-read-aloud-document";
+
+/** The element that wraps the rendered markdown being narrated. */
+export function readAloudRootSelector(source: ReadAloudSource): string {
+  return source.kind === "message"
+    ? `[data-assistant-citation-source="${CSS.escape(source.messageId)}"]`
+    : `[${READ_ALOUD_DOCUMENT_ATTRIBUTE}="${CSS.escape(source.path)}"]`;
 }
 
 /** A static highlight: no transition, so nothing repaints while the narration plays. */
-export function highlightStyleSheet(messageId: string, offsets: ReadonlyArray<number>): string {
+export function highlightStyleSheet(rootSelector: string, offsets: ReadonlyArray<number>): string {
   if (offsets.length === 0) return "";
-  const root = messageRootSelector(messageId);
   const selectors = offsets
-    .map((offset) => `${root} [${READ_ALOUD_OFFSET_ATTRIBUTE}="${offset}"]`)
+    .map((offset) => `${rootSelector} [${READ_ALOUD_OFFSET_ATTRIBUTE}="${offset}"]`)
     .join(",\n");
   return `${selectors} {
   border-radius: 0.375rem;
