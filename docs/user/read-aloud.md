@@ -1,6 +1,6 @@
 # Read aloud
 
-Read aloud explains an agent's reply out loud instead of making you read it. It is not a verbatim reading: a model turns the reply into a short spoken explanation, block by block, the way a teammate would walk you through it on a call. It skips over code, paths, commands, and IDs, saying what they are or do instead, and summarizes tables and long lists. It works on web and desktop.
+Read aloud explains an agent's reply out loud instead of making you read it. It is not a verbatim reading: a model turns the reply into a short spoken explanation, block by block, the way a teammate would walk you through it on a call. It skips over code, paths, commands, and IDs, saying what they are or do instead, and summarizes tables and long lists. It works on web, including mobile browsers such as Safari on iPhone, and desktop. The T3 Code mobile app does not have it yet.
 
 ## Set it up
 
@@ -11,6 +11,8 @@ The explanation is written by the environment's text generation model. Turn on *
 ## Listen to a reply
 
 Hover a finished reply and select the speaker button next to copy. T3 Code prepares the narration, starts playing as soon as the first part is ready, and highlights the part of the reply being explained, scrolling it into view as it goes. A bar above the composer shows the sentence being spoken, with previous, play or pause, next, speed, and stop. The speaker button pauses and resumes the reply that is playing.
+
+On a phone, tap the speaker button under the reply. Narration keeps playing with the screen locked, and the lock screen and Control Center controls pause, skip, and stop it.
 
 Press **Escape** to stop. Switching threads also stops it, and only one reply plays at a time.
 

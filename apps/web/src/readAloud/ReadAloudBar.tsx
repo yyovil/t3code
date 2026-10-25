@@ -82,7 +82,7 @@ export function ReadAloudBar({ stopShortcut }: { readonly stopShortcut: string |
             ) : null}
             <span className="min-w-0 truncate text-foreground/80">{caption}</span>
           </ComposerBanner.Content>
-          <ComposerBanner.Actions className="flex-nowrap">
+          <ComposerBanner.Actions className="flex-nowrap pointer-coarse:gap-3">
             <TransportButton
               label="Previous"
               disabled={!active}

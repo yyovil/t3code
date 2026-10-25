@@ -15,6 +15,7 @@ import {
 
 import { toastManager } from "../components/ui/toast";
 import { appAtomRegistry } from "../rpc/atomRegistry";
+import { readThreadShell } from "../state/entities";
 import { readPreparedConnection } from "../state/session";
 import {
   highlightedOffsets,
@@ -57,15 +58,26 @@ interface Session {
   readonly blocks: ReadonlyArray<ReadAloudBlock>;
   segments: ReadonlyArray<ReadAloudSegment>;
   sentences: ReadonlyArray<ReadonlyArray<string>>;
-  readonly audio: Map<number, HTMLAudioElement>;
+  readonly warmed: Set<number>;
   readonly retried: Set<number>;
 }
+
+const MEDIA_SESSION_ACTIONS = ["play", "pause", "nexttrack", "previoustrack", "stop"] as const;
 
 /**
  * The app plays one narration at a time, owned here rather than by a message
  * row: the timeline virtualizes rows, and playback must outlive them. Rows and
  * the transport bar subscribe; highlighting is a stylesheet keyed by message,
  * so a row that remounts picks it up without asking.
+ *
+ * Every segment plays through one audio element. WebKit (all iOS browsers)
+ * lets an element play with sound only once a user gesture has touched it,
+ * and narration starts after seconds of preparation, long past the tap. So the
+ * element is created and unlocked synchronously inside the first tap, then
+ * reused: swapping its `src` needs no further gesture, including from an
+ * `ended` handler with the screen locked, and the lock screen keeps one
+ * consistent "now playing" source. Upcoming segments are warmed with plain
+ * requests, since iOS ignores `preload` on elements that are not playing.
  */
 class ReadAloudPlayer {
   private state: ReadAloudState = IDLE;
@@ -74,6 +86,10 @@ class ReadAloudPlayer {
   private rate: ReadAloudSpeed = 1;
   private readonly listeners = new Set<() => void>();
   private styleElement: HTMLStyleElement | null = null;
+  private element: HTMLAudioElement | null = null;
+  /** The session and segment the element's current `src` belongs to. */
+  private loaded: { readonly session: Session; readonly index: number } | null = null;
+  private mediaSessionOwner: Session | null = null;
 
   readonly subscribe = (listener: () => void) => {
     this.listeners.add(listener);
@@ -86,6 +102,7 @@ class ReadAloudPlayer {
 
   private setState(state: ReadAloudState) {
     this.state = state;
+    this.syncMediaSession();
     for (const listener of this.listeners) listener();
   }
 
@@ -98,13 +115,76 @@ class ReadAloudPlayer {
     return this.state.status !== "idle" && this.state.target.messageId === messageId;
   }
 
-  /** Starts a narration, or pauses and resumes the one already playing this message. */
+  /**
+   * Starts a narration, or pauses and resumes the one already playing this
+   * message. Call it from the user's tap: it unlocks audio before anything awaits.
+   */
   toggle(target: ReadAloudTarget, rate: ReadAloudSpeed) {
+    this.unlockAudio();
     if (this.isTarget(target.messageId)) {
       if (this.state.status === "active") this.setPaused(!this.state.paused);
       return;
     }
     void this.start(target, rate);
+  }
+
+  /**
+   * Must run synchronously within a user gesture. A `load()` or `play()` in a
+   * gesture lifts WebKit's playback restrictions for the element's lifetime.
+   * While a narration holds the element, the tap's own play() does that.
+   */
+  private unlockAudio(): HTMLAudioElement {
+    const audio = (this.element ??= this.createElement());
+    // Plays alongside other audio as media rather than ambient sound: ignores
+    // the silent switch and keeps going with the screen locked.
+    const audioSession = (navigator as { audioSession?: { type: string } }).audioSession;
+    if (audioSession) audioSession.type = "playback";
+    if (!audio.hasAttribute("src")) audio.load();
+    return audio;
+  }
+
+  private createElement(): HTMLAudioElement {
+    const audio = new Audio();
+    audio.preload = "auto";
+    audio.preservesPitch = true;
+    const current = () => {
+      const loaded = this.loaded;
+      if (!loaded || this.session !== loaded.session) return null;
+      if (this.state.status !== "active" || this.state.index !== loaded.index) return null;
+      return loaded;
+    };
+    audio.addEventListener("ended", () => {
+      if (current()) this.next();
+    });
+    audio.addEventListener("waiting", () => {
+      if (current()) this.patchActive({ buffering: true });
+    });
+    audio.addEventListener("playing", () => {
+      if (current()) this.patchActive({ buffering: false });
+    });
+    // The system pauses and resumes media on its own (calls, headphones,
+    // Siri); keep the bar truthful.
+    audio.addEventListener("pause", () => {
+      if (current() && audio.paused && !audio.ended) this.patchActive({ paused: true });
+    });
+    audio.addEventListener("play", () => {
+      if (current()) this.patchActive({ paused: false });
+    });
+    audio.addEventListener("timeupdate", () => {
+      const loaded = current();
+      if (!loaded) return;
+      const sentences = loaded.session.sentences[loaded.index] ?? [];
+      const caption =
+        sentences[spokenSentenceIndex(sentences, audio.currentTime, audio.duration)] ?? "";
+      if (this.state.status === "active" && this.state.caption !== caption) {
+        this.patchActive({ caption });
+      }
+    });
+    audio.addEventListener("error", () => {
+      const loaded = current();
+      if (loaded) void this.recover(loaded.session, loaded.index);
+    });
+    return audio;
   }
 
   private async start(target: ReadAloudTarget, rate: ReadAloudSpeed) {
@@ -118,7 +198,7 @@ class ReadAloudPlayer {
       });
       return;
     }
-    this.rate = rate;
+    this.setRate(rate);
     const session: Session = {
       id: ++this.nextSessionId,
       target,
@@ -126,7 +206,7 @@ class ReadAloudPlayer {
       blocks: splitReadAloudBlocks(target.text),
       segments: [],
       sentences: [],
-      audio: new Map(),
+      warmed: new Set(),
       retried: new Set(),
     };
     this.session = session;
@@ -171,11 +251,15 @@ class ReadAloudPlayer {
   }
 
   stop() {
-    const session = this.session;
     this.session = null;
-    if (session) {
-      for (const audio of session.audio.values()) releaseAudio(audio);
-      session.audio.clear();
+    this.loaded = null;
+    const audio = this.element;
+    if (audio?.hasAttribute("src")) {
+      audio.pause();
+      // Dropping the source ends any download still running for it. The
+      // element stays unlocked for the next narration.
+      audio.removeAttribute("src");
+      audio.load();
     }
     this.renderHighlight(null);
     if (this.state.status !== "idle") this.setState(IDLE);
@@ -198,19 +282,26 @@ class ReadAloudPlayer {
   setPaused(paused: boolean) {
     const session = this.session;
     if (!session || this.state.status !== "active") return;
-    const audio = session.audio.get(this.state.index);
-    if (paused) audio?.pause();
-    else if (audio) void this.play(session, this.state.index, audio);
+    const audio = paused ? this.element : this.unlockAudio();
+    if (audio && this.loaded?.session === session) {
+      if (paused) audio.pause();
+      else void this.play(session, this.state.index, audio);
+    }
     this.patchActive({ paused });
   }
 
   setRate(rate: ReadAloudSpeed) {
     this.rate = rate;
-    for (const audio of this.session?.audio.values() ?? []) audio.playbackRate = rate;
+    if (!this.element) return;
+    // Loading a new source resets playbackRate to defaultPlaybackRate.
+    this.element.defaultPlaybackRate = rate;
+    this.element.playbackRate = rate;
   }
 
+  /** From a tap, the lock screen, or the end of the previous segment. */
   next() {
     if (this.state.status !== "active") return;
+    this.unlockAudio();
     if (this.state.index + 1 >= this.state.segmentCount) {
       this.stop();
       return;
@@ -219,15 +310,10 @@ class ReadAloudPlayer {
   }
 
   previous() {
-    const session = this.session;
-    if (!session || this.state.status !== "active") return;
-    const current = session.audio.get(this.state.index);
-    if (this.state.index === 0 || (current?.currentTime ?? 0) > RESTART_THRESHOLD_SECONDS) {
-      if (current) current.currentTime = 0;
-      this.playSegment(this.state.index);
-      return;
-    }
-    this.playSegment(this.state.index - 1);
+    if (this.state.status !== "active") return;
+    const audio = this.unlockAudio();
+    const restart = this.state.index === 0 || audio.currentTime > RESTART_THRESHOLD_SECONDS;
+    this.playSegment(restart ? this.state.index : this.state.index - 1);
   }
 
   private audioUrl(session: Session, index: number): string | null {
@@ -235,68 +321,42 @@ class ReadAloudPlayer {
     return segment ? resolveAssetUrl(session.httpBaseUrl, segment.audioUrl) : null;
   }
 
-  /** The same element prefetches and plays a segment, so it is synthesized once. */
-  private audioFor(session: Session, index: number): HTMLAudioElement | null {
-    const existing = session.audio.get(index);
-    if (existing && existing.error === null) return existing;
-    if (existing) releaseAudio(existing);
-    const url = this.audioUrl(session, index);
-    if (!url) return null;
-    const audio = new Audio();
-    audio.preload = "auto";
-    audio.preservesPitch = true;
-    audio.playbackRate = this.rate;
-    const isCurrent = () =>
-      this.session === session && this.state.status === "active" && this.state.index === index;
-    audio.addEventListener("ended", () => {
-      if (isCurrent()) this.next();
-    });
-    audio.addEventListener("waiting", () => {
-      if (isCurrent()) this.patchActive({ buffering: true });
-    });
-    audio.addEventListener("playing", () => {
-      if (isCurrent()) this.patchActive({ buffering: false });
-    });
-    audio.addEventListener("timeupdate", () => {
-      if (!isCurrent()) return;
-      const sentences = session.sentences[index] ?? [];
-      const caption =
-        sentences[spokenSentenceIndex(sentences, audio.currentTime, audio.duration)] ?? "";
-      if (this.state.status === "active" && this.state.caption !== caption) {
-        this.patchActive({ caption });
-      }
-    });
-    audio.addEventListener("error", () => {
-      if (isCurrent()) void this.recover(session, index, url);
-    });
-    audio.src = url;
-    session.audio.set(index, audio);
-    return audio;
-  }
-
   private playSegment(index: number) {
     const session = this.session;
     if (!session || this.state.status !== "active") return;
-    const audio = this.audioFor(session, index);
-    if (!audio) return;
-    for (const [other, element] of session.audio) {
-      if (other === index) continue;
-      element.pause();
-      // Keep the one behind for "previous"; anything further back is done.
-      if (other < index - 1) {
-        releaseAudio(element);
-        session.audio.delete(other);
-      }
+    const url = this.audioUrl(session, index);
+    if (!url) return;
+    const audio = (this.element ??= this.createElement());
+    if (this.loaded?.session === session && this.loaded.index === index) {
+      audio.currentTime = 0;
+    } else {
+      this.loaded = { session, index };
+      audio.src = url;
+      audio.playbackRate = this.rate;
     }
-    if (audio.currentTime > 0 && audio.ended) audio.currentTime = 0;
     this.patchActive({
       index,
       buffering: audio.readyState < HTMLMediaElement.HAVE_FUTURE_DATA,
       caption: session.sentences[index]?.[0] ?? "",
     });
     if (!this.state.paused) void this.play(session, index, audio);
-    for (let ahead = 1; ahead <= PREFETCH_AHEAD; ahead++) this.audioFor(session, index + ahead);
+    for (let ahead = 1; ahead <= PREFETCH_AHEAD; ahead++) this.warm(session, index + ahead);
     this.renderHighlight(session, index, true);
+  }
+
+  /**
+   * Starts synthesis of a later segment. The server shares one synthesis
+   * between this request and the element's, and finishes caching it after this
+   * request lets go, so the response body is not needed.
+   */
+  private warm(session: Session, index: number) {
+    if (session.warmed.has(index)) return;
+    const url = this.audioUrl(session, index);
+    if (!url) return;
+    session.warmed.add(index);
+    void fetch(url)
+      .then((response) => response.body?.cancel())
+      .catch(() => undefined);
   }
 
   private async play(session: Session, index: number, audio: HTMLAudioElement) {
@@ -305,20 +365,21 @@ class ReadAloudPlayer {
     } catch (error) {
       // Pausing or skipping before playback starts rejects the pending play().
       if (error instanceof DOMException && error.name === "AbortError") return;
+      // NotAllowedError lands here too; the bar's play tap is a gesture that retries.
       if (this.session !== session || this.state.status !== "active") return;
       if (this.state.index === index) this.patchActive({ paused: true, buffering: false });
     }
   }
 
   /** Media errors carry no reason, so ask the server for it with a plain request. */
-  private async recover(session: Session, index: number, url: string) {
-    const response = await fetch(url).catch(() => null);
+  private async recover(session: Session, index: number) {
+    const url = this.audioUrl(session, index);
+    const response = url ? await fetch(url).catch(() => null) : null;
     if (this.session !== session) return;
     if (response?.ok && !session.retried.has(index)) {
       // A transient failure; the audio is cached on the server now.
       session.retried.add(index);
-      session.audio.get(index)?.removeAttribute("src");
-      session.audio.delete(index);
+      this.loaded = null;
       this.playSegment(index);
       return;
     }
@@ -338,6 +399,39 @@ class ReadAloudPlayer {
       title: "Read aloud stopped",
       description: message ?? "The audio could not be played.",
     });
+  }
+
+  /** The lock screen and Control Center mirror the bar and drive the same methods. */
+  private syncMediaSession() {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) return;
+    const mediaSession = navigator.mediaSession;
+    const session = this.state.status === "active" ? this.session : null;
+    if (session !== this.mediaSessionOwner) {
+      this.mediaSessionOwner = session;
+      mediaSession.metadata = session
+        ? new MediaMetadata({ title: narrationTitle(session.target), artist: "T3 Code" })
+        : null;
+      for (const action of MEDIA_SESSION_ACTIONS) {
+        setActionHandler(mediaSession, action, session ? this.mediaActionHandler(action) : null);
+      }
+    }
+    mediaSession.playbackState =
+      this.state.status !== "active" ? "none" : this.state.paused ? "paused" : "playing";
+  }
+
+  private mediaActionHandler(action: (typeof MEDIA_SESSION_ACTIONS)[number]): () => void {
+    switch (action) {
+      case "play":
+        return () => this.setPaused(false);
+      case "pause":
+        return () => this.setPaused(true);
+      case "nexttrack":
+        return () => this.next();
+      case "previoustrack":
+        return () => this.previous();
+      case "stop":
+        return () => this.stop();
+    }
   }
 
   private renderHighlight(session: null): void;
@@ -368,11 +462,24 @@ class ReadAloudPlayer {
   }
 }
 
-function releaseAudio(audio: HTMLAudioElement) {
-  audio.pause();
-  // Dropping the source ends any download still running for it.
-  audio.removeAttribute("src");
-  audio.load();
+function narrationTitle(target: ReadAloudTarget): string {
+  const title = readThreadShell({
+    environmentId: target.environmentId,
+    threadId: target.threadId,
+  })?.title.trim();
+  return title || "Read aloud";
+}
+
+function setActionHandler(
+  mediaSession: MediaSession,
+  action: MediaSessionAction,
+  handler: (() => void) | null,
+) {
+  try {
+    mediaSession.setActionHandler(action, handler);
+  } catch {
+    // Browsers throw for actions they do not support.
+  }
 }
 
 function scrollContainer(element: HTMLElement): HTMLElement | null {
