@@ -66,6 +66,20 @@ const decodeClaudeOutput = Schema.decodeEffect(
   Schema.fromJsonString(Schema.Union([ClaudeOutputEnvelope, Schema.Array(ClaudeOutputMessage)])),
 );
 
+/** A piece of the structured output, from `--include-partial-messages`. */
+const ClaudeStructuredOutputDelta = Schema.Struct({
+  type: Schema.Literal("stream_event"),
+  event: Schema.Struct({
+    type: Schema.Literal("content_block_delta"),
+    delta: Schema.Struct({
+      type: Schema.Literal("input_json_delta"),
+      partial_json: Schema.String,
+    }),
+  }),
+});
+const isClaudeStructuredOutputDelta = Schema.is(ClaudeStructuredOutputDelta);
+const isClaudeStreamEvent = Schema.is(Schema.Struct({ type: Schema.Literal("stream_event") }));
+
 const ClaudeErrorResult = Schema.Struct({ is_error: Schema.Literal(true), result: Schema.String });
 const isClaudeErrorResult = Schema.is(ClaudeErrorResult);
 const decodeJsonOption = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
@@ -110,6 +124,37 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
       ),
     );
 
+  /**
+   * `--output-format stream-json` prints one message per line. Structured output
+   * pieces go to `onPartialOutput` as they arrive; the other messages come back
+   * as the array `--output-format json --verbose` prints, so the rest of the run
+   * reads them the same way.
+   */
+  const readStreamJsonMessages = <E>(
+    operation: string,
+    stream: Stream.Stream<Uint8Array, E>,
+    onPartialOutput: (chunk: string) => Effect.Effect<void>,
+  ): Effect.Effect<string, TextGenerationError> =>
+    stream.pipe(
+      Stream.decodeText(),
+      Stream.splitLines,
+      Stream.runFoldEffect(
+        (): Array<string> => [],
+        (messages, line) => {
+          const message = Option.getOrUndefined(decodeJsonOption(line));
+          if (isClaudeStructuredOutputDelta(message)) {
+            return onPartialOutput(message.event.delta.partial_json).pipe(Effect.as(messages));
+          }
+          if (message !== undefined && !isClaudeStreamEvent(message)) messages.push(line);
+          return Effect.succeed(messages);
+        },
+      ),
+      Effect.map((messages) => `[${messages.join(",")}]`),
+      Effect.mapError((cause) =>
+        normalizeCliError("claude", operation, cause, "Failed to collect process output"),
+      ),
+    );
+
   const encodeJsonForOperation = (
     operation: TextGenerationOperations.Operation,
     value: unknown,
@@ -133,6 +178,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     outputSchema: outputSchemaJson,
     modelSelection,
     investigate,
+    onPartialOutput,
   }: TextGenerationOperations.Request<S>): Effect.fn.Return<
     S["Type"],
     TextGenerationError,
@@ -203,8 +249,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
         claudeSettings.binaryPath || "claude",
         [
           "-p",
-          "--output-format",
-          "json",
+          ...(onPartialOutput
+            ? ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
+            : ["--output-format", "json"]),
           "--json-schema",
           jsonSchemaStr,
           "--model",
@@ -251,7 +298,9 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
 
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [
-          readStreamAsString(operation, child.stdout),
+          onPartialOutput
+            ? readStreamJsonMessages(operation, child.stdout, onPartialOutput)
+            : readStreamAsString(operation, child.stdout),
           readStreamAsString(operation, child.stderr),
           child.exitCode.pipe(
             Effect.mapError((cause) =>

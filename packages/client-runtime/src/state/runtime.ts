@@ -25,12 +25,14 @@ import {
   type EnvironmentRpcFailure,
   type EnvironmentRpcStreamFailure,
   type EnvironmentRpcStreamValue,
+  type EnvironmentStreamCommandRpcTag,
   type EnvironmentSubscriptionRpcTag,
   type EnvironmentUnaryRpcTag,
   EnvironmentRpcUnavailableError,
   request,
   requestGuarded,
   RpcPermissionGuard,
+  runStreamGuarded,
   subscribe,
 } from "../rpc/client.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -898,6 +900,49 @@ export function createEnvironmentRpcCommand<
         Effect.ensuring(options.onSettled?.(target, registry) ?? Effect.void),
       );
     },
+  });
+  return {
+    ...command,
+    requiredScopes: permissions.requiredScopes,
+    permissionAtom: permissions.permissionAtom,
+  };
+}
+
+/**
+ * A streaming RPC run as a guarded command. Each value reaches `onValue` as it
+ * arrives; returning false from it ends the stream early. The command settles
+ * when the stream does.
+ */
+export function createEnvironmentRpcStreamCommand<
+  R,
+  ER,
+  TTag extends EnvironmentStreamCommandRpcTag,
+>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry.EnvironmentRegistry | R, ER>,
+  options: { readonly label: string; readonly tag: TTag },
+) {
+  const permissions = createCommandPermissions(runtime, options.tag);
+  const command = createEnvironmentCommand(runtime, {
+    label: options.label,
+    execute: (
+      input: {
+        readonly request: EnvironmentRpcInput<TTag>;
+        readonly onValue: (value: EnvironmentRpcStreamValue<TTag>) => boolean;
+      },
+      registry,
+      environmentId,
+    ) =>
+      permissions.authorize(registry, environmentId, input.request).pipe(
+        Effect.andThen(() =>
+          runStreamGuarded(options.tag, input.request).pipe(
+            Stream.runForEachWhile((value) => Effect.sync(() => input.onValue(value))),
+          ),
+        ),
+        Effect.provideService(RpcPermissionGuard, {
+          authorize: (id, method, payload) =>
+            createCommandPermissions(runtime, method).authorize(registry, id, payload),
+        }),
+      ),
   });
   return {
     ...command,

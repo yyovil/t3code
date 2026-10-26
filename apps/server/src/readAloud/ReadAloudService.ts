@@ -8,9 +8,12 @@ import {
   type ReadAloudListVoicesResult,
   type ReadAloudPrepareError,
   type ReadAloudPrepareInput,
-  type ReadAloudPrepareResult,
+  type ReadAloudSegment,
+  type RunId,
+  type ThreadId,
 } from "@t3tools/contracts";
-import { splitReadAloudBlocks } from "@t3tools/shared/readAloudBlocks";
+import type { NarrationSegmentDraft } from "@t3tools/provider-core/server/textGeneration";
+import { splitReadAloudBlocks, type ReadAloudBlock } from "@t3tools/shared/readAloudBlocks";
 import { resolveReadAloudModelSelection } from "@t3tools/shared/serverSettings";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -36,21 +39,24 @@ import {
 } from "../auth/utils.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
+import { forkParked } from "../serverActivation.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as ElevenLabs from "./elevenLabs.ts";
 import {
+  makeNarrationAssembler,
   narrationContext,
-  repairNarrationSegments,
+  verbatimOpening,
   type NarrationContext,
   type NarrationSegment,
 } from "./narration.ts";
 
 export const READ_ALOUD_ROUTE_PREFIX = "/api/read-aloud";
 /** Bump when the narration prompt or block split changes, so cached narrations regenerate. */
-const NARRATION_VERSION = 1;
+const NARRATION_VERSION = 2;
 const SIGNING_SECRET_NAME = "read-aloud-signing-key";
 const AUDIO_TOKEN_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_CACHE_MAX_BYTES = 300 * 1024 * 1024;
@@ -133,23 +139,88 @@ export type ReadAloudAudio =
   | { readonly kind: "stream"; readonly stream: Stream.Stream<Uint8Array, ReadAloudAudioError> };
 
 /**
- * One synthesis per segment, however many requests ask for it. The browser's
- * prefetch and its playback request share the upstream stream, and audio keeps
- * downloading into the cache when a listener stops early.
+ * Output one producer appends and any number of readers replay from the
+ * start, live. A reader that joins late misses nothing, and the producer keeps
+ * going when every reader leaves, so the result still lands in the cache.
  */
-interface AudioJob {
-  readonly started: Deferred.Deferred<void, ReadAloudAudioError>;
-  readonly chunks: Array<Uint8Array>;
-  state: "running" | "done" | ReadAloudAudioError;
+interface Broadcast<A, E> {
+  readonly items: Array<A>;
+  state: "running" | "done" | { readonly error: E };
   wake: Deferred.Deferred<void>;
+}
+
+const makeBroadcast = <A, E>() =>
+  Deferred.make<void>().pipe(
+    Effect.map((wake): Broadcast<A, E> => ({ items: [], state: "running", wake })),
+  );
+
+// Runs once per audio chunk; the producer's span already covers it.
+const notify = Effect.fnUntraced(function* <A, E>(broadcast: Broadcast<A, E>) {
+  const wake = broadcast.wake;
+  broadcast.wake = yield* Deferred.make<void>();
+  yield* Deferred.succeed(wake, undefined);
+});
+
+const publish = <A, E>(broadcast: Broadcast<A, E>, item: A) =>
+  Effect.suspend(() => {
+    broadcast.items.push(item);
+    return notify(broadcast);
+  });
+
+const settle = <A, E>(broadcast: Broadcast<A, E>, state: Broadcast<A, E>["state"]) =>
+  Effect.suspend(() => {
+    broadcast.state = state;
+    return notify(broadcast);
+  });
+
+// Per-item reads of the buffer; the reader's own span already covers them.
+const readBroadcast = <A, E>(broadcast: Broadcast<A, E>): Stream.Stream<A, E> =>
+  Stream.paginate(
+    0,
+    (offset: number): Effect.Effect<readonly [ReadonlyArray<A>, Option.Option<number>], E> => {
+      if (broadcast.items.length > offset) {
+        return Effect.succeed([
+          broadcast.items.slice(offset),
+          Option.some(broadcast.items.length),
+        ] as const);
+      }
+      const state = broadcast.state;
+      if (state === "done") return Effect.succeed([[], Option.none<number>()] as const);
+      if (state !== "running") return Effect.fail(state.error);
+      return Deferred.await(broadcast.wake).pipe(Effect.as([[], Option.some(offset)] as const));
+    },
+  );
+
+/** One synthesis per segment, however many requests ask for it: prefetch and playback share it. */
+interface AudioJob extends Broadcast<Uint8Array, ReadAloudAudioError> {
+  readonly started: Deferred.Deferred<void, ReadAloudAudioError>;
+}
+
+/**
+ * One narration per message, whoever asks: a listener, a second tab, or the
+ * preparation that runs when a reply finishes. Segments go out as they are
+ * written, and the audio route reads them here until the narration is cached.
+ */
+interface NarrationJob extends Broadcast<NarrationSegment, TextGenerationError> {
+  readonly voiceId: string;
+  readonly ttsModel: string;
 }
 
 export class ReadAloudService extends Context.Service<
   ReadAloudService,
   {
+    /** The narration's segments in order, each as soon as it exists. */
     readonly prepare: (
       input: ReadAloudPrepareInput,
-    ) => Effect.Effect<ReadAloudPrepareResult, ReadAloudPrepareError>;
+    ) => Stream.Stream<ReadAloudSegment, ReadAloudPrepareError>;
+    /**
+     * Narrates the reply a finished run ended with, so pressing play later
+     * starts at once. Does nothing unless the user turned it on.
+     */
+    readonly prepareInAdvance: (run: {
+      readonly threadId: ThreadId;
+      readonly runId: RunId;
+    }) => Effect.Effect<void>;
     readonly listVoices: Effect.Effect<ReadAloudListVoicesResult, ReadAloudListVoicesError>;
     /** Null when the token is forged, expired, or names a narration no longer cached. */
     readonly audio: (
@@ -174,6 +245,7 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
   const cacheDir = path.join(config.stateDir, "read-aloud");
   const cacheMaxBytes = options?.cacheMaxBytes ?? DEFAULT_CACHE_MAX_BYTES;
   const jobs = new Map<string, AudioJob>();
+  const narrations = new Map<string, NarrationJob>();
   const jobScope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(jobScope, Exit.void));
 
@@ -270,75 +342,163 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
     return context;
   });
 
-  const prepare: ReadAloudService["Service"]["prepare"] = Effect.fn("ReadAloudService.prepare")(
-    function* (input) {
-      yield* apiKey;
-      const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
-      const context = yield* resolveContext(input);
-      const blocks = splitReadAloudBlocks(context.text);
-      if (blocks.length === 0) {
-        return yield* "path" in input
-          ? new ReadAloudDocumentEmptyError({ path: input.path })
-          : new ReadAloudMessageNotFoundError(input);
-      }
-
-      const providers = yield* providerRegistry.getProviders;
-      const modelSelection = resolveReadAloudModelSelection(settings, providers);
-      const { voiceId, ttsModel } = settings.readAloud;
-      const key = yield* narrationCacheKey({
-        text: context.text,
-        documentPath: context.subject.kind === "document" ? context.subject.path : undefined,
-        voiceId,
-        ttsModel,
-        modelSelection,
-      }).pipe(Effect.provideService(Crypto.Crypto, crypto), Effect.orDie);
-
-      const cached = yield* readNarration(key);
-      const record: NarrationRecord = Option.isSome(cached)
-        ? cached.value
-        : yield* Effect.gen(function* () {
-            yield* fs.makeDirectory(cacheDir, { recursive: true }).pipe(Effect.ignore);
-            const generated = yield* textGeneration.generateNarration({
-              // A neutral directory keeps repository instructions out of a prompt that needs none.
-              cwd: cacheDir,
-              blocks: blocks.map((block, index) => ({
-                index,
-                kind: block.kind,
-                source: block.source,
-              })),
-              subject: context.subject,
-              modelSelection,
-            });
-            const segments = repairNarrationSegments(blocks.length, generated.segments);
-            if (segments.length === 0) {
-              return yield* new TextGenerationError({
-                operation: "generateNarration",
-                detail: "The model returned no narration.",
-              });
-            }
-            const fresh = { voiceId, ttsModel, segments };
-            yield* writeCacheFile(
-              narrationPath(key),
-              new TextEncoder().encode(encodeNarrationRecord(fresh)),
-            );
-            return fresh;
-          });
-
-      const secret = yield* signingSecret.pipe(
-        Effect.mapError(
-          (cause) =>
-            new TextGenerationError({
-              operation: "generateNarration",
-              detail: "Could not sign audio links.",
-              cause,
+  const startNarration = Effect.fn("ReadAloudService.startNarration")(function* (request: {
+    readonly key: string;
+    readonly context: NarrationContext;
+    readonly blocks: ReadonlyArray<ReadAloudBlock>;
+    readonly voiceId: string;
+    readonly ttsModel: string;
+    readonly modelSelection: ModelSelection;
+  }) {
+    const existing = narrations.get(request.key);
+    if (existing) return existing;
+    const job: NarrationJob = {
+      ...(yield* makeBroadcast<NarrationSegment, TextGenerationError>()),
+      voiceId: request.voiceId,
+      ttsModel: request.ttsModel,
+    };
+    narrations.set(request.key, job);
+    const { blocks } = request;
+    const run = Effect.gen(function* () {
+      const opening = verbatimOpening(blocks);
+      yield* Effect.forEach(opening, (segment) => publish(job, segment), { discard: true });
+      if (opening.length < blocks.length) {
+        const assembler = makeNarrationAssembler(blocks.length, opening.length);
+        const take = (draft: NarrationSegmentDraft) => {
+          const segment = assembler.push(draft);
+          return segment ? publish(job, segment) : Effect.void;
+        };
+        let drafted = 0;
+        yield* fs.makeDirectory(cacheDir, { recursive: true }).pipe(Effect.ignore);
+        const generated = yield* textGeneration.generateNarration({
+          // A neutral directory keeps repository instructions out of a prompt that needs none.
+          cwd: cacheDir,
+          blocks: blocks.map((block, index) => ({ index, kind: block.kind, source: block.source })),
+          subject: request.context.subject,
+          modelSelection: request.modelSelection,
+          spokenBlocks: opening.length,
+          onDraft: (draft) =>
+            Effect.suspend(() => {
+              drafted++;
+              return take(draft);
             }),
+        });
+        yield* Effect.forEach(generated.segments.slice(drafted), take, { discard: true });
+        // Without a last segment, the blocks after the opening would go unread.
+        const last = assembler.finish();
+        if (!last) {
+          return yield* new TextGenerationError({
+            operation: "generateNarration",
+            detail: "The model returned no narration.",
+          });
+        }
+        yield* publish(job, last);
+      }
+      yield* writeCacheFile(
+        narrationPath(request.key),
+        new TextEncoder().encode(
+          encodeNarrationRecord({
+            voiceId: request.voiceId,
+            ttsModel: request.ttsModel,
+            segments: job.items,
+          }),
         ),
       );
-      const segments = yield* Effect.forEach(record.segments, (segment, index) =>
+      yield* settle(job, "done");
+    }).pipe(
+      Effect.catch((error: TextGenerationError) =>
+        settle(job, { error }).pipe(
+          Effect.andThen(Effect.logWarning("read aloud narration failed", { cause: error })),
+        ),
+      ),
+      Effect.ensuring(Effect.sync(() => narrations.delete(request.key))),
+      Effect.withSpan("ReadAloudService.generateNarration"),
+    );
+    yield* Effect.forkIn(run, jobScope);
+    return job;
+  });
+
+  /** The cached narration, or the one being written: started here if nobody has yet. */
+  const narrate = Effect.fn("ReadAloudService.narrate")(function* (
+    context: NarrationContext,
+    blocks: ReadonlyArray<ReadAloudBlock>,
+  ) {
+    const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+    const providers = yield* providerRegistry.getProviders;
+    const modelSelection = resolveReadAloudModelSelection(settings, providers);
+    const { voiceId, ttsModel } = settings.readAloud;
+    const key = yield* narrationCacheKey({
+      text: context.text,
+      documentPath: context.subject.kind === "document" ? context.subject.path : undefined,
+      voiceId,
+      ttsModel,
+      modelSelection,
+    }).pipe(Effect.provideService(Crypto.Crypto, crypto), Effect.orDie);
+    const cached = yield* readNarration(key);
+    const segments: Stream.Stream<NarrationSegment, TextGenerationError> = Option.isSome(cached)
+      ? Stream.fromIterable(cached.value.segments)
+      : readBroadcast(
+          yield* startNarration({ key, context, blocks, voiceId, ttsModel, modelSelection }),
+        );
+    return { key, segments };
+  });
+
+  const prepareSegments = Effect.fn("ReadAloudService.prepare")(function* (
+    input: ReadAloudPrepareInput,
+  ) {
+    yield* apiKey;
+    const context = yield* resolveContext(input);
+    const blocks = splitReadAloudBlocks(context.text);
+    if (blocks.length === 0) {
+      return yield* "path" in input
+        ? new ReadAloudDocumentEmptyError({ path: input.path })
+        : new ReadAloudMessageNotFoundError(input);
+    }
+    const secret = yield* signingSecret.pipe(
+      Effect.mapError(
+        (cause) =>
+          new TextGenerationError({
+            operation: "generateNarration",
+            detail: "Could not sign audio links.",
+            cause,
+          }),
+      ),
+    );
+    const { key, segments } = yield* narrate(context, blocks);
+    return segments.pipe(
+      Stream.zipWithIndex,
+      Stream.mapEffect(([segment, index]) =>
         mintAudioUrl(key, index, secret).pipe(Effect.map((audioUrl) => ({ ...segment, audioUrl }))),
-      );
-      return { segments };
+      ),
+    );
+  });
+
+  const prepare: ReadAloudService["Service"]["prepare"] = (input) =>
+    Stream.unwrap(prepareSegments(input));
+
+  const prepareInAdvance: ReadAloudService["Service"]["prepareInAdvance"] = Effect.fn(
+    "ReadAloudService.prepareInAdvance",
+  )(
+    function* (run) {
+      const settings = yield* serverSettings.getSettings;
+      if (!settings.readAloud.prepareInAdvance || settings.readAloud.elevenLabsApiKey === "") {
+        return;
+      }
+      const projection = yield* projections.getThreadProjection(run.threadId);
+      // Subagent threads finish runs nobody reads; preparing them would spend tokens for nothing.
+      if (projection.thread.lineage.parentThreadId !== null) return;
+      const message = projection.visibleTurnItems.findLast(
+        ({ item }) => item.type === "assistant_message" && item.runId === run.runId,
+      )?.item;
+      if (message?.type !== "assistant_message") return;
+      const context = narrationContext(projection, message.messageId);
+      if (!context) return;
+      const blocks = splitReadAloudBlocks(context.text);
+      if (blocks.length > 0) yield* narrate(context, blocks);
     },
+    Effect.catchCause((cause) =>
+      Effect.logWarning("preparing a narration in advance failed", { cause }),
+    ),
   );
 
   const listVoices: ReadAloudService["Service"]["listVoices"] = Effect.gen(function* () {
@@ -365,116 +525,75 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
     return claims.value.expiresAt > now ? claims : Option.none();
   });
 
-  // Per-chunk reads of the job buffer; the request span already covers them.
-  const readJob = (job: AudioJob): Stream.Stream<Uint8Array, ReadAloudAudioError> =>
-    Stream.paginate(
-      0,
-      (
-        offset: number,
-      ): Effect.Effect<
-        readonly [ReadonlyArray<Uint8Array>, Option.Option<number>],
-        ReadAloudAudioError
-      > => {
-        if (job.chunks.length > offset) {
-          return Effect.succeed([
-            job.chunks.slice(offset),
-            Option.some(job.chunks.length),
-          ] as const);
-        }
-        if (job.state === "done") return Effect.succeed([[], Option.none<number>()] as const);
-        if (job.state !== "running") return Effect.fail(job.state);
-        return Deferred.await(job.wake).pipe(Effect.as([[], Option.some(offset)] as const));
-      },
-    );
-
   const startJob = Effect.fn("ReadAloudService.startJob")(function* (
     audioKey: string,
     filePath: string,
     request: ElevenLabs.SpeechRequest,
   ) {
-    {
-      const existing = jobs.get(audioKey);
-      if (existing) return existing;
-      const job: AudioJob = {
-        started: yield* Deferred.make<void, ReadAloudAudioError>(),
-        chunks: [],
-        state: "running",
-        wake: yield* Deferred.make<void>(),
-      };
-      jobs.set(audioKey, job);
-      const notify = Effect.gen(function* () {
-        const wake = job.wake;
-        job.wake = yield* Deferred.make<void>();
-        yield* Deferred.succeed(wake, undefined);
-      });
-      const run = Effect.gen(function* () {
-        const response = yield* ElevenLabs.synthesizeSpeech(request).pipe(
-          Effect.mapError(
-            (cause) =>
-              new ReadAloudAudioError({
-                status: 502,
-                reason: "Could not reach ElevenLabs.",
-                cause,
-              }),
-          ),
-        );
-        if (response.status < 200 || response.status >= 300) {
-          const body = yield* response.text.pipe(Effect.orElseSucceed(() => ""));
-          return yield* new ReadAloudAudioError({
-            status: response.status === 401 || response.status === 429 ? response.status : 502,
-            reason: ElevenLabs.speechFailureMessage(response.status, body),
-          });
-        }
-        yield* Deferred.succeed(job.started, undefined);
-        yield* response.stream.pipe(
-          Stream.mapError(
-            (cause) =>
-              new ReadAloudAudioError({
-                status: 502,
-                reason: "ElevenLabs stopped sending audio.",
-                cause,
-              }),
-          ),
-          // Chunk-level bookkeeping under the synthesis span.
-          Stream.runForEach((chunk) =>
-            Effect.suspend(() => {
-              job.chunks.push(chunk);
-              return notify;
+    const existing = jobs.get(audioKey);
+    if (existing) return existing;
+    const job: AudioJob = {
+      ...(yield* makeBroadcast<Uint8Array, ReadAloudAudioError>()),
+      started: yield* Deferred.make<void, ReadAloudAudioError>(),
+    };
+    jobs.set(audioKey, job);
+    const run = Effect.gen(function* () {
+      const response = yield* ElevenLabs.synthesizeSpeech(request).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ReadAloudAudioError({
+              status: 502,
+              reason: "Could not reach ElevenLabs.",
+              cause,
             }),
-          ),
-        );
-        const size = job.chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-        const bytes = new Uint8Array(size);
-        let offset = 0;
-        for (const chunk of job.chunks) {
-          bytes.set(chunk, offset);
-          offset += chunk.byteLength;
-        }
-        yield* writeCacheFile(filePath, bytes);
-        job.state = "done";
-      }).pipe(
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-        Effect.catch((error: ReadAloudAudioError) =>
-          Effect.gen(function* () {
-            job.state = error;
-            yield* Deferred.fail(job.started, error);
-            yield* Effect.logWarning("read aloud synthesis failed", {
-              status: error.status,
-              cause: error.cause,
-            });
-          }),
         ),
-        Effect.ensuring(
-          Effect.suspend(() => {
-            jobs.delete(audioKey);
-            return notify;
-          }),
-        ),
-        Effect.withSpan("ReadAloudService.synthesize"),
       );
-      yield* Effect.forkIn(run, jobScope);
-      return job;
-    }
+      if (response.status < 200 || response.status >= 300) {
+        const body = yield* response.text.pipe(Effect.orElseSucceed(() => ""));
+        return yield* new ReadAloudAudioError({
+          status: response.status === 401 || response.status === 429 ? response.status : 502,
+          reason: ElevenLabs.speechFailureMessage(response.status, body),
+        });
+      }
+      yield* Deferred.succeed(job.started, undefined);
+      yield* response.stream.pipe(
+        Stream.mapError(
+          (cause) =>
+            new ReadAloudAudioError({
+              status: 502,
+              reason: "ElevenLabs stopped sending audio.",
+              cause,
+            }),
+        ),
+        // Chunk-level bookkeeping under the synthesis span.
+        Stream.runForEach((chunk) => publish(job, chunk)),
+      );
+      const size = job.items.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const chunk of job.items) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      yield* writeCacheFile(filePath, bytes);
+      yield* settle(job, "done");
+    }).pipe(
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+      Effect.catch((error: ReadAloudAudioError) =>
+        Effect.gen(function* () {
+          yield* settle(job, { error });
+          yield* Deferred.fail(job.started, error);
+          yield* Effect.logWarning("read aloud synthesis failed", {
+            status: error.status,
+            cause: error.cause,
+          });
+        }),
+      ),
+      Effect.ensuring(Effect.sync(() => jobs.delete(audioKey))),
+      Effect.withSpan("ReadAloudService.synthesize"),
+    );
+    yield* Effect.forkIn(run, jobScope);
+    return job;
   });
 
   const audio: ReadAloudService["Service"]["audio"] = Effect.fn("ReadAloudService.audio")(
@@ -487,7 +606,15 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
         yield* touch(filePath);
         return { kind: "file", path: filePath } as const;
       }
-      const record = yield* readNarration(key);
+      // A narration still being written is not cached yet; its segments so far are enough.
+      const writing = narrations.get(key);
+      const record = writing
+        ? Option.some({
+            voiceId: writing.voiceId,
+            ttsModel: writing.ttsModel,
+            segments: writing.items,
+          })
+        : yield* readNarration(key);
       if (Option.isNone(record)) return null;
       const target = record.value.segments[segment];
       if (!target) return null;
@@ -499,11 +626,30 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
         ...stitchContext(record.value.segments, segment),
       });
       yield* Deferred.await(job.started);
-      return { kind: "stream", stream: readJob(job) } as const;
+      return { kind: "stream", stream: readBroadcast(job) } as const;
     },
   );
 
-  return ReadAloudService.of({ prepare, listVoices, audio });
+  return ReadAloudService.of({ prepare, prepareInAdvance, listVoices, audio });
 });
 
 export const layer = Layer.effect(ReadAloudService, make());
+
+/** Prepares narrations as runs finish, for users who turned that on. */
+export const layerPrepareInAdvance = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const service = yield* ReadAloudService;
+    const engine = yield* Orchestrator.OrchestratorV2;
+    yield* forkParked(
+      Stream.runForEach(engine.streamDomainEvents, (event) =>
+        event.type === "run.updated" && event.payload.status === "completed"
+          ? service.prepareInAdvance({ threadId: event.threadId, runId: event.payload.id })
+          : Effect.void,
+      ).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("read aloud preparation event stream failed", { cause }),
+        ),
+      ),
+    );
+  }),
+);

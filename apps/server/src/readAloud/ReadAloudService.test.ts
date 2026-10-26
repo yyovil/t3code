@@ -1,8 +1,15 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { MessageId, ProviderInstanceId, TextGenerationError, ThreadId } from "@t3tools/contracts";
+import {
+  MessageId,
+  ProviderInstanceId,
+  RunId,
+  TextGenerationError,
+  ThreadId,
+} from "@t3tools/contracts";
 import type { NarrationGenerationInput } from "@t3tools/provider-core/server/textGeneration";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -19,10 +26,11 @@ import * as ReadAloudService from "./ReadAloudService.ts";
 
 const threadId = ThreadId.make("thread-1");
 const messageId = MessageId.make("assistant-1");
+const runId = RunId.make("run-1");
 const reply = "## Fix\n\nUploads retry now.\n\n- Backoff doubles\n- Gives up after five tries";
 
 const projection = {
-  thread: { title: "Flaky uploads" },
+  thread: { title: "Flaky uploads", lineage: { parentThreadId: null } },
   visibleTurnItems: [
     { item: { type: "user_message", messageId: "user-1", text: "make uploads retry" } },
     {
@@ -30,7 +38,7 @@ const projection = {
         type: "assistant_message",
         messageId,
         text: reply,
-        runId: null,
+        runId,
         streaming: false,
       },
     },
@@ -54,6 +62,8 @@ const makeLayer = (
     readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
     readonly speechStatus?: number;
     readonly narration?: ReadonlyArray<{ firstBlock: number; lastBlock: number; speech: string }>;
+    /** Keeps the model writing, after it streamed its segments, until the test releases it. */
+    readonly modelDone?: Deferred.Deferred<void>;
   } = {},
 ) =>
   ReadAloudService.layer.pipe(
@@ -70,14 +80,17 @@ const makeLayer = (
     Layer.provide(
       Layer.succeed(TextGeneration.TextGeneration, {
         generateNarration: (input: NarrationGenerationInput) =>
-          Effect.sync(() => {
+          Effect.gen(function* () {
             harness.narrations.push(input);
-            return {
-              segments: options.narration ?? [
-                { firstBlock: 0, lastBlock: 1, speech: "Uploads now retry." },
-                { firstBlock: 2, lastBlock: 3, speech: "They back off and give up after five." },
-              ],
-            };
+            const segments = options.narration ?? [
+              { firstBlock: 2, lastBlock: 2, speech: "The wait doubles each time." },
+              { firstBlock: 3, lastBlock: 3, speech: "It gives up after five." },
+            ];
+            if (options.modelDone) {
+              yield* Effect.forEach(segments, (draft) => input.onDraft?.(draft) ?? Effect.void);
+              yield* Deferred.await(options.modelDone);
+            }
+            return { segments };
           }),
       } as unknown as TextGeneration.TextGeneration["Service"]),
     ),
@@ -173,26 +186,37 @@ describe("narrationCacheKey", () => {
   );
 });
 
+const speeches = [
+  "Fix",
+  "Uploads retry now.",
+  "The wait doubles each time.",
+  "It gives up after five.",
+];
+
+const prepared = (input: Parameters<ReadAloudService.ReadAloudService["Service"]["prepare"]>[0]) =>
+  ReadAloudService.ReadAloudService.use((service) =>
+    Stream.runCollect(service.prepare(input)).pipe(Effect.map((segments) => [...segments])),
+  );
+
 describe("ReadAloudService", () => {
   it.effect("asks for an ElevenLabs key before spending anything", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness;
-      const error = yield* Effect.gen(function* () {
-        const service = yield* ReadAloudService.ReadAloudService;
-        return yield* service.prepare({ threadId, messageId }).pipe(Effect.flip);
-      }).pipe(Effect.provide(makeLayer(harness, { settings: {} })));
+      const error = yield* prepared({ threadId, messageId }).pipe(
+        Effect.flip,
+        Effect.provide(makeLayer(harness, { settings: {} })),
+      );
       expect(error._tag).toBe("ReadAloudNotConfiguredError");
       expect(harness.narrations).toEqual([]);
     }),
   );
 
-  it.effect("narrates once per message and serves the cached narration after", () =>
+  it.effect("reads the opening as written, narrates the rest once, and caches it", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness;
       yield* Effect.gen(function* () {
-        const service = yield* ReadAloudService.ReadAloudService;
-        const first = yield* service.prepare({ threadId, messageId });
-        const second = yield* service.prepare({ threadId, messageId });
+        const first = yield* prepared({ threadId, messageId });
+        const second = yield* prepared({ threadId, messageId });
 
         expect(harness.narrations).toHaveLength(1);
         const [narration] = harness.narrations;
@@ -207,15 +231,59 @@ describe("ReadAloudService", () => {
           "list-item",
           "list-item",
         ]);
-        expect(first.segments.map(({ audioUrl: _url, ...segment }) => segment)).toEqual([
-          { firstBlock: 0, lastBlock: 1, speech: "Uploads now retry." },
-          { firstBlock: 2, lastBlock: 3, speech: "They back off and give up after five." },
-        ]);
-        expect(second.segments.map((segment) => segment.speech)).toEqual(
-          first.segments.map((segment) => segment.speech),
+        expect(narration?.spokenBlocks).toBe(2);
+        expect(first.map(({ audioUrl: _url, ...segment }) => segment)).toEqual(
+          speeches.map((speech, index) => ({ firstBlock: index, lastBlock: index, speech })),
         );
-        expect(first.segments[0]?.audioUrl).toMatch(/^\/api\/read-aloud\/[\w-]+\.[\w-]+\/0\.mp3$/);
+        expect(second.map((segment) => segment.speech)).toEqual(speeches);
+        expect(first[0]?.audioUrl).toMatch(/^\/api\/read-aloud\/[\w-]+\.[\w-]+\/0\.mp3$/);
       }).pipe(Effect.provide(makeLayer(harness)));
+    }),
+  );
+
+  it.effect("hands out segments and their audio while the model is still writing", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const modelDone = yield* Deferred.make<void>();
+      yield* Effect.gen(function* () {
+        const service = yield* ReadAloudService.ReadAloudService;
+        const early = yield* Stream.runCollect(
+          service.prepare({ threadId, messageId }).pipe(Stream.take(3)),
+        );
+        // The last segment waits for the model: a gap after it could still extend it.
+        expect([...early].map((segment) => segment.speech)).toEqual(speeches.slice(0, 3));
+
+        const audio = yield* service.audio(tokenOf([...early][2]?.audioUrl ?? ""));
+        expect(audio?.kind).toBe("stream");
+        expect(harness.speechBodies[0]).toContain('"text":"The wait doubles each time."');
+
+        yield* Deferred.succeed(modelDone, undefined);
+        const all = yield* prepared({ threadId, messageId });
+        expect(all.map((segment) => segment.speech)).toEqual(speeches);
+        expect(harness.narrations).toHaveLength(1);
+      }).pipe(Effect.provide(makeLayer(harness, { modelDone })));
+    }),
+  );
+
+  it.effect("prepares the reply a finished run ended with, when turned on", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness;
+      const settings = { readAloud: { elevenLabsApiKey: "xi-secret", prepareInAdvance: true } };
+      yield* Effect.gen(function* () {
+        const service = yield* ReadAloudService.ReadAloudService;
+        yield* service.prepareInAdvance({ threadId, runId: RunId.make("run-other") });
+        expect(harness.narrations).toHaveLength(0);
+        yield* service.prepareInAdvance({ threadId, runId });
+        const segments = yield* prepared({ threadId, messageId });
+        expect(segments.map((segment) => segment.speech)).toEqual(speeches);
+        expect(harness.narrations).toHaveLength(1);
+      }).pipe(Effect.provide(makeLayer(harness, { settings })));
+
+      const off = yield* makeHarness;
+      yield* ReadAloudService.ReadAloudService.use((service) =>
+        service.prepareInAdvance({ threadId, runId }),
+      ).pipe(Effect.provide(makeLayer(off)));
+      expect(off.narrations).toHaveLength(0);
     }),
   );
 
@@ -223,23 +291,19 @@ describe("ReadAloudService", () => {
     Effect.gen(function* () {
       const harness = yield* makeHarness;
       yield* Effect.gen(function* () {
-        const service = yield* ReadAloudService.ReadAloudService;
         const path = "docs/uploads.md";
-        const { segments } = yield* service.prepare({ path, text: reply });
-        yield* service.prepare({ path, text: reply });
+        const segments = yield* prepared({ path, text: reply });
+        yield* prepared({ path, text: reply });
         // The same text as a reply is a different prompt, so it narrates again.
-        yield* service.prepare({ threadId, messageId });
+        yield* prepared({ threadId, messageId });
 
         expect(harness.narrations.map((narration) => narration.subject)).toEqual([
           { kind: "document", path },
           expect.objectContaining({ kind: "reply" }),
         ]);
-        expect(segments.map((segment) => segment.speech)).toEqual([
-          "Uploads now retry.",
-          "They back off and give up after five.",
-        ]);
+        expect(segments.map((segment) => segment.speech)).toEqual(speeches);
 
-        const error = yield* service.prepare({ path, text: "  \n" }).pipe(Effect.flip);
+        const error = yield* prepared({ path, text: "  \n" }).pipe(Effect.flip);
         expect(error._tag).toBe("ReadAloudDocumentEmptyError");
       }).pipe(Effect.provide(makeLayer(harness)));
     }),
@@ -251,7 +315,7 @@ describe("ReadAloudService", () => {
       yield* Effect.gen(function* () {
         const service = yield* ReadAloudService.ReadAloudService;
         const fs = yield* FileSystem.FileSystem;
-        const { segments } = yield* service.prepare({ threadId, messageId });
+        const segments = yield* prepared({ threadId, messageId });
         const token = tokenOf(segments[0]?.audioUrl ?? "");
 
         const [first, second] = yield* Effect.all([service.audio(token), service.audio(token)]);
@@ -264,7 +328,7 @@ describe("ReadAloudService", () => {
         harness.releaseAudio();
         expect(yield* reading).toEqual(["ID3-first-second", "ID3-first-second"]);
         expect(harness.speechBodies).toHaveLength(1);
-        expect(harness.speechBodies[0]).toContain('"next_text":"They back off');
+        expect(harness.speechBodies[0]).toContain('"next_text":"Uploads retry now."');
 
         const cached = yield* service.audio(token);
         if (cached?.kind !== "file") return expect.fail("expected the cached file");
@@ -279,7 +343,7 @@ describe("ReadAloudService", () => {
       const harness = yield* makeHarness;
       yield* Effect.gen(function* () {
         const service = yield* ReadAloudService.ReadAloudService;
-        const { segments } = yield* service.prepare({ threadId, messageId });
+        const segments = yield* prepared({ threadId, messageId });
         const [payload] = tokenOf(segments[0]?.audioUrl ?? "").split(".");
         expect(yield* service.audio(`${payload}.forged`)).toBeNull();
         expect(yield* service.audio("garbage")).toBeNull();
@@ -293,7 +357,7 @@ describe("ReadAloudService", () => {
       const harness = yield* makeHarness;
       yield* Effect.gen(function* () {
         const service = yield* ReadAloudService.ReadAloudService;
-        const { segments } = yield* service.prepare({ threadId, messageId });
+        const segments = yield* prepared({ threadId, messageId });
         const error = yield* service.audio(tokenOf(segments[1]?.audioUrl ?? "")).pipe(Effect.flip);
         expect(error).toMatchObject({
           _tag: "ReadAloudAudioError",
@@ -304,16 +368,16 @@ describe("ReadAloudService", () => {
     }),
   );
 
-  it.effect("fails when the model says nothing", () =>
+  it.effect("fails when the model leaves the rest unsaid", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness;
       const layer = makeLayer(harness, {
-        narration: [{ firstBlock: 0, lastBlock: 3, speech: " " }],
+        narration: [{ firstBlock: 2, lastBlock: 3, speech: " " }],
       });
-      const error = yield* Effect.gen(function* () {
-        const service = yield* ReadAloudService.ReadAloudService;
-        return yield* service.prepare({ threadId, messageId }).pipe(Effect.flip);
-      }).pipe(Effect.provide(layer));
+      const error = yield* prepared({ threadId, messageId }).pipe(
+        Effect.flip,
+        Effect.provide(layer),
+      );
       expect(error).toBeInstanceOf(TextGenerationError);
     }),
   );

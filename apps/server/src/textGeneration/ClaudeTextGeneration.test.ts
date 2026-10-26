@@ -289,6 +289,51 @@ it.layer(layerClaudeTextGenerationTest)("ClaudeTextGeneration", (it) => {
     ),
   );
 
+  it.effect("hands narration segments over while Claude is still writing", () => {
+    const json = JSON.stringify({
+      segments: [
+        { firstBlock: 0, lastBlock: 0, speech: "Retries back off now." },
+        { firstBlock: 1, lastBlock: 1, speech: "The test covers it." },
+      ],
+    });
+    const cut = json.indexOf("{", json.indexOf("{", 1) + 1);
+    const delta = (partial_json: string) => ({
+      type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "input_json_delta", partial_json } },
+    });
+    const lines = [
+      { type: "system", subtype: "init" },
+      delta(json.slice(0, cut)),
+      delta(json.slice(cut)),
+      { type: "result", subtype: "success", structured_output: JSON.parse(json) },
+    ];
+    return withFakeClaudeEnv(
+      {
+        output: lines.map((line) => JSON.stringify(line)).join("\n"),
+        argsMustContain: "--include-partial-messages",
+      },
+      (textGeneration) =>
+        Effect.gen(function* () {
+          const drafts: Array<string> = [];
+          const generated = yield* textGeneration.generateNarration({
+            cwd: process.cwd(),
+            blocks: [
+              { index: 0, kind: "paragraph", source: "Retries now back off." },
+              { index: 1, kind: "paragraph", source: "Added a test." },
+            ],
+            subject: { kind: "document", path: "NOTES.md" },
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+              model: SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            },
+            onDraft: (draft) => Effect.sync(() => drafts.push(draft.speech)),
+          });
+          expect(drafts).toEqual(["Retries back off now.", "The test covers it."]);
+          expect(generated.segments).toHaveLength(2);
+        }),
+    );
+  });
+
   it.effect("runs Claude text generation with the configured CLAUDE_CONFIG_DIR", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;

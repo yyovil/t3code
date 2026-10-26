@@ -43,7 +43,10 @@ export type ReadAloudState =
   | {
       readonly status: "active";
       readonly target: ReadAloudTarget;
+      /** Segments so far; more arrive while the server is still writing the narration. */
       readonly segmentCount: number;
+      readonly complete: boolean;
+      /** May equal segmentCount: playback reached the end of what has arrived and waits. */
       readonly index: number;
       readonly paused: boolean;
       /** Waiting for audio: the first bytes of a segment, or a stalled stream. */
@@ -60,8 +63,9 @@ interface Session {
   readonly target: ReadAloudTarget;
   readonly httpBaseUrl: string;
   readonly blocks: ReadonlyArray<ReadAloudBlock>;
-  segments: ReadonlyArray<ReadAloudSegment>;
-  sentences: ReadonlyArray<ReadonlyArray<string>>;
+  readonly segments: Array<ReadAloudSegment>;
+  readonly sentences: Array<ReadonlyArray<string>>;
+  complete: boolean;
   readonly warmed: Set<number>;
   readonly retried: Set<number>;
 }
@@ -210,6 +214,7 @@ class ReadAloudPlayer {
       blocks: splitReadAloudBlocks(target.text),
       segments: [],
       sentences: [],
+      complete: false,
       warmed: new Set(),
       retried: new Set(),
     };
@@ -221,37 +226,56 @@ class ReadAloudPlayer {
       readAloudPrepare,
       {
         environmentId: target.environmentId,
-        input: prepareInput(target),
+        input: {
+          request: prepareInput(target),
+          onValue: (segment) => this.receive(session, segment),
+        },
       },
       { reportFailure: false },
     );
     if (this.session !== session) return;
+    session.complete = true;
+    const waiting = this.state.status !== "active" || this.state.index >= session.segments.length;
     if (result._tag === "Failure") {
-      this.stop();
+      // Whatever already arrived still plays; the narration just ends sooner.
+      if (waiting) this.stop();
       const error = squashAtomCommandFailure(result);
       toastManager.add({
         type: "error",
-        title: "Could not read aloud",
+        title: session.segments.length > 0 ? "Read aloud stopped early" : "Could not read aloud",
         description: error instanceof Error ? error.message : "The narration failed.",
       });
       return;
     }
-    if (result.value.segments.length === 0) {
-      this.stop();
-      return;
+    if (waiting) this.stop();
+    else this.patchActive({ complete: true });
+  }
+
+  /** A segment from the server, in order. Returns false once nobody is listening for more. */
+  private receive(session: Session, segment: ReadAloudSegment): boolean {
+    if (this.session !== session) return false;
+    const index = session.segments.length;
+    session.segments.push(segment);
+    session.sentences.push(splitSentences(segment.speech));
+    if (this.state.status !== "active") {
+      this.setState({
+        status: "active",
+        target: session.target,
+        segmentCount: 1,
+        complete: false,
+        index: 0,
+        paused: false,
+        buffering: true,
+        caption: session.sentences[0]?.[0] ?? "",
+      });
+      this.playSegment(0);
+      return true;
     }
-    session.segments = result.value.segments;
-    session.sentences = result.value.segments.map((segment) => splitSentences(segment.speech));
-    this.setState({
-      status: "active",
-      target,
-      segmentCount: session.segments.length,
-      index: 0,
-      paused: false,
-      buffering: true,
-      caption: session.sentences[0]?.[0] ?? "",
-    });
-    this.playSegment(0);
+    const current = this.state.index;
+    this.patchActive({ segmentCount: session.segments.length });
+    if (current === index) this.playSegment(index);
+    else if (index - current <= PREFETCH_AHEAD) this.warm(session, index);
+    return true;
   }
 
   stop() {
@@ -287,7 +311,7 @@ class ReadAloudPlayer {
     const session = this.session;
     if (!session || this.state.status !== "active") return;
     const audio = paused ? this.element : this.unlockAudio();
-    if (audio && this.loaded?.session === session) {
+    if (audio && this.loaded?.session === session && this.loaded.index === this.state.index) {
       if (paused) audio.pause();
       else void this.play(session, this.state.index, audio);
     }
@@ -306,17 +330,20 @@ class ReadAloudPlayer {
   next() {
     if (this.state.status !== "active") return;
     this.unlockAudio();
-    if (this.state.index + 1 >= this.state.segmentCount) {
+    if (this.state.index + 1 >= this.state.segmentCount && this.state.complete) {
       this.stop();
       return;
     }
-    this.playSegment(this.state.index + 1);
+    this.playSegment(Math.min(this.state.index + 1, this.state.segmentCount));
   }
 
   previous() {
     if (this.state.status !== "active") return;
     const audio = this.unlockAudio();
-    const restart = this.state.index === 0 || audio.currentTime > RESTART_THRESHOLD_SECONDS;
+    // While waiting for a segment, the element still holds the one that ended.
+    const waiting = this.state.index >= this.state.segmentCount;
+    const restart =
+      !waiting && (this.state.index === 0 || audio.currentTime > RESTART_THRESHOLD_SECONDS);
     this.playSegment(restart ? this.state.index : this.state.index - 1);
   }
 
@@ -329,7 +356,12 @@ class ReadAloudPlayer {
     const session = this.session;
     if (!session || this.state.status !== "active") return;
     const url = this.audioUrl(session, index);
-    if (!url) return;
+    if (!url) {
+      // Not written yet: wait for it, and `receive` plays it on arrival.
+      this.patchActive({ index, buffering: true, caption: "" });
+      this.renderHighlight(null);
+      return;
+    }
     const audio = (this.element ??= this.createElement());
     if (this.loaded?.session === session && this.loaded.index === index) {
       audio.currentTime = 0;

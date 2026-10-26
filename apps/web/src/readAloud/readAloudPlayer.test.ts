@@ -9,11 +9,21 @@ function deferred() {
   return { promise, resolve };
 }
 
-const mocks = { prepare: deferred(), prepareInputs: [] as Array<unknown> };
+interface PrepareInput {
+  readonly request: unknown;
+  readonly onValue: (segment: unknown) => boolean;
+}
+
+const mocks = {
+  prepare: deferred(),
+  prepareInputs: [] as Array<unknown>,
+  onValue: (_segment: unknown) => false,
+};
 
 vi.mock("@t3tools/client-runtime/state/runtime", () => ({
-  runAtomCommand: (_registry: unknown, _command: unknown, request: { input: unknown }) => {
-    mocks.prepareInputs.push(request.input);
+  runAtomCommand: (_registry: unknown, _command: unknown, request: { input: PrepareInput }) => {
+    mocks.prepareInputs.push(request.input.request);
+    mocks.onValue = request.input.onValue;
     return mocks.prepare.promise;
   },
   squashAtomCommandFailure: () => new Error("failed"),
@@ -145,8 +155,11 @@ async function setup() {
     });
   const prepared = async () => {
     const started = active();
-    mocks.prepare.resolve({ _tag: "Success", value: { segments } });
+    for (const segment of segments) mocks.onValue(segment);
+    mocks.prepare.resolve({ _tag: "Success", value: undefined });
     await started;
+    // Let the command's settlement land.
+    await mocks.prepare.promise;
   };
   const startNarration = async (id = "message-1", rate: 1 | 1.5 = 1) => {
     mocks.prepare = deferred();
@@ -230,6 +243,45 @@ describe("readAloudPlayer", () => {
     expect(mediaSession.metadata).toBeNull();
     expect(mediaSession.playbackState).toBe("none");
     expect([...mediaSession.handlers.values()].every((handler) => handler === null)).toBe(true);
+  });
+
+  it("plays segments as they arrive and waits at the end of what has arrived", async () => {
+    const { readAloudPlayer } = await setup();
+    const settled = deferred();
+    mocks.prepare = settled;
+    readAloudPlayer.toggle(target("message-1"), 1);
+    expect(mocks.onValue(segments[0])).toBe(true);
+    const [audio] = FakeAudio.instances;
+    expect(audio!.src).toBe(url(0));
+    expect(readAloudPlayer.getSnapshot()).toMatchObject({ segmentCount: 1, complete: false });
+
+    audio!.ended = true;
+    audio!.dispatchEvent(new Event("ended"));
+    expect(readAloudPlayer.getSnapshot()).toMatchObject({
+      status: "active",
+      index: 1,
+      buffering: true,
+    });
+
+    mocks.onValue(segments[1]);
+    expect(audio!.src).toBe(url(1));
+    expect(FakeAudio.log.at(-1)).toBe("play");
+
+    const completed = new Promise<void>((resolve) => {
+      const unsubscribe = readAloudPlayer.subscribe(() => {
+        const state = readAloudPlayer.getSnapshot();
+        if (state.status !== "active" || !state.complete) return;
+        unsubscribe();
+        resolve();
+      });
+    });
+    settled.resolve({ _tag: "Success", value: undefined });
+    await completed;
+    expect(readAloudPlayer.getSnapshot()).toMatchObject({ segmentCount: 2, index: 1 });
+    audio!.dispatchEvent(new Event("ended"));
+    expect(readAloudPlayer.getSnapshot()).toEqual({ status: "idle" });
+    // A stopped narration tells the stream to end.
+    expect(mocks.onValue(segments[2])).toBe(false);
   });
 
   it("narrates a markdown file from the text on screen", async () => {

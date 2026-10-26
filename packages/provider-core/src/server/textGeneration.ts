@@ -124,6 +124,13 @@ export interface NarrationGenerationInput {
   blocks: ReadonlyArray<NarrationBlock>;
   subject: NarrationSubject;
   modelSelection: ModelSelection;
+  /** How many leading blocks the listener already heard word for word; narration starts after them. */
+  spokenBlocks?: number | undefined;
+  /**
+   * Called with each segment as the model finishes writing it, when the provider can stream.
+   * It may see only a prefix of the result's segments, or none; the result always has all.
+   */
+  onDraft?: ((draft: NarrationSegmentDraft) => Effect.Effect<void>) | undefined;
 }
 
 export interface NarrationSegmentDraft {

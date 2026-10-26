@@ -707,6 +707,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["read aloud explain response speech llm text generation"],
   },
   {
+    id: "read-aloud-prepare",
+    title: "Prepare narration in advance",
+    to: "/settings/integrations",
+    scope: "environment",
+    searchTerms: ["read aloud instant start faster latency precompute when replies finish"],
+  },
+  {
     id: "read-aloud-speed",
     title: "Read aloud speed",
     to: "/settings/integrations",

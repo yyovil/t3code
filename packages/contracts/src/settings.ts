@@ -849,6 +849,8 @@ export const ReadAloudSettings = Schema.Struct({
   ttsModel: TrimmedString.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_READ_ALOUD_TTS_MODEL)),
   ),
+  /** Narrate each reply when its run finishes, so playback starts at once. Spends model tokens. */
+  prepareInAdvance: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
 });
 export type ReadAloudSettings = typeof ReadAloudSettings.Type;
 
@@ -1639,6 +1641,7 @@ export const ServerSettingsPatch = Schema.Struct({
       elevenLabsApiKey: Schema.optionalKey(TrimmedString),
       voiceId: Schema.optionalKey(TrimmedString),
       ttsModel: Schema.optionalKey(TrimmedString),
+      prepareInAdvance: Schema.optionalKey(Schema.Boolean),
     }),
   ),
   pullRequestMergeMethod: Schema.optionalKey(Schema.NullOr(PullRequestMergeMethod)),

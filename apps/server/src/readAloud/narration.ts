@@ -1,4 +1,5 @@
 import type { MessageId, OrchestrationV2ThreadProjection } from "@t3tools/contracts";
+import { verbatimSpeech, type ReadAloudBlock } from "@t3tools/shared/readAloudBlocks";
 import type {
   NarrationSegmentDraft,
   NarrationSubject,
@@ -10,56 +11,74 @@ export interface NarrationSegment {
   readonly speech: string;
 }
 
-/**
- * Model output is advisory. Every block must belong to exactly one segment, in
- * order, or the highlight skips or repeats text. Overlaps are trimmed, ranges
- * past the end are clamped, and a gap joins the segment before it (or the one
- * after it at the start), since a highlight with no matching words beats one
- * that jumps over text. Segments with nothing to say merge into a neighbor.
- */
-export function repairNarrationSegments(
-  blockCount: number,
-  drafts: ReadonlyArray<NarrationSegmentDraft>,
-): ReadonlyArray<NarrationSegment> {
-  if (blockCount <= 0) return [];
-  const last = blockCount - 1;
-  const clamp = (value: number) => Math.min(Math.max(Math.trunc(value), 0), last);
-  const ordered = drafts
-    .map((draft) => {
-      const first = clamp(Math.min(draft.firstBlock, draft.lastBlock));
-      return {
-        firstBlock: first,
-        lastBlock: clamp(Math.max(draft.firstBlock, draft.lastBlock)),
-        speech: draft.speech.replace(/\s+/g, " ").trim(),
-      };
-    })
-    .toSorted((a, b) => a.firstBlock - b.firstBlock || a.lastBlock - b.lastBlock);
+export interface NarrationAssembler {
+  /** Takes the model's next draft; returns a segment once its range can no longer change. */
+  readonly push: (draft: NarrationSegmentDraft) => NarrationSegment | null;
+  /** The last segment, stretched to the final block; null when nothing was said. */
+  readonly finish: () => NarrationSegment | null;
+}
 
-  const segments: Array<{ firstBlock: number; lastBlock: number; speech: string }> = [];
-  let next = 0;
-  for (const draft of ordered) {
-    if (draft.lastBlock < next) continue;
-    const previous = segments.at(-1);
-    if (draft.speech.length === 0) {
-      // Keep its blocks covered without an empty clip.
-      if (previous) previous.lastBlock = draft.lastBlock;
-      else segments.push({ ...draft, firstBlock: 0 });
-      next = draft.lastBlock + 1;
-      continue;
-    }
-    if (draft.firstBlock > next && previous) previous.lastBlock = draft.firstBlock - 1;
-    segments.push({ ...draft, firstBlock: previous ? previous.lastBlock + 1 : 0 });
-    next = draft.lastBlock + 1;
+/**
+ * Model output is advisory, and it arrives one draft at a time. Every block
+ * from `firstBlock` on must belong to exactly one segment, in order, or the
+ * highlight skips or repeats text. Drafts behind the covered range are dropped,
+ * ranges past the end are clamped, and a gap joins the segment before it (or
+ * the first segment), since a highlight with no matching words beats one that
+ * jumps over text. Drafts with nothing to say merge into a neighbor. A segment
+ * is held back until the next draft arrives, because a gap can still extend it.
+ */
+export function makeNarrationAssembler(blockCount: number, firstBlock = 0): NarrationAssembler {
+  const last = blockCount - 1;
+  const clamp = (value: number) => Math.min(Math.max(Math.trunc(value), firstBlock), last);
+  let pending: { firstBlock: number; lastBlock: number; speech: string } | null = null;
+  let next = firstBlock;
+  return {
+    push: (draft) => {
+      if (next > last) return null;
+      const first = clamp(Math.min(draft.firstBlock, draft.lastBlock));
+      const lastBlock = clamp(Math.max(draft.firstBlock, draft.lastBlock));
+      if (lastBlock < next) return null;
+      next = lastBlock + 1;
+      const speech = draft.speech.replace(/\s+/g, " ").trim();
+      if (speech.length === 0) {
+        // Keep its blocks covered without an empty clip; the next segment takes them otherwise.
+        if (pending) pending.lastBlock = lastBlock;
+        return null;
+      }
+      const done = pending;
+      if (done && first > done.lastBlock + 1) done.lastBlock = first - 1;
+      pending = { firstBlock: done ? done.lastBlock + 1 : firstBlock, lastBlock, speech };
+      return done;
+    },
+    finish: () => {
+      const done = pending;
+      pending = null;
+      if (done) done.lastBlock = last;
+      return done;
+    },
+  };
+}
+
+const VERBATIM_OPENING_CHARS = 240;
+const VERBATIM_BLOCK_MAX_CHARS = 600;
+
+/**
+ * The prose a narration opens with, read as written while the model rewrites
+ * the rest, so speech starts without waiting for it. Stops at the first block
+ * that needs explaining (code, a table, a list) or once there is enough to
+ * cover the wait. One segment per block keeps the highlight precise.
+ */
+export function verbatimOpening(blocks: ReadonlyArray<ReadAloudBlock>): Array<NarrationSegment> {
+  const segments: Array<NarrationSegment> = [];
+  let chars = 0;
+  for (const [index, block] of blocks.entries()) {
+    if (chars >= VERBATIM_OPENING_CHARS || block.source.length > VERBATIM_BLOCK_MAX_CHARS) break;
+    const speech = verbatimSpeech(block);
+    if (speech === null) break;
+    segments.push({ firstBlock: index, lastBlock: index, speech });
+    chars += speech.length;
   }
-  const tail = segments.at(-1);
-  if (tail) tail.lastBlock = last;
-  // A run of empty drafts at the start leaves an empty first segment: fold it forward.
-  const first = segments[0];
-  const second = segments[1];
-  if (first && second && first.speech.length === 0) {
-    segments.splice(0, 2, { ...second, firstBlock: 0 });
-  }
-  return segments.filter((segment) => segment.speech.length > 0);
+  return segments;
 }
 
 export interface NarrationContext {

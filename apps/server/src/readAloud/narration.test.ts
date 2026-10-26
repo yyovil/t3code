@@ -1,7 +1,9 @@
 import { MessageId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { narrationContext, repairNarrationSegments } from "./narration.ts";
+import { splitReadAloudBlocks } from "@t3tools/shared/readAloudBlocks";
+
+import { makeNarrationAssembler, narrationContext, verbatimOpening } from "./narration.ts";
 
 const segment = (
   firstBlock: number,
@@ -16,10 +18,21 @@ const segment = (
 const ranges = (segments: ReadonlyArray<{ firstBlock: number; lastBlock: number }>) =>
   segments.map(({ firstBlock, lastBlock }) => [firstBlock, lastBlock]);
 
-describe("repairNarrationSegments", () => {
+function assemble(
+  blockCount: number,
+  drafts: ReadonlyArray<ReturnType<typeof segment>>,
+  firstBlock = 0,
+) {
+  const assembler = makeNarrationAssembler(blockCount, firstBlock);
+  const segments = drafts.flatMap((draft) => assembler.push(draft) ?? []);
+  const last = assembler.finish();
+  return last ? [...segments, last] : segments;
+}
+
+describe("makeNarrationAssembler", () => {
   it("keeps a complete, ordered cover as is", () => {
-    const repaired = repairNarrationSegments(4, [segment(0, 1), segment(2, 2), segment(3, 3)]);
-    expect(ranges(repaired)).toEqual([
+    const assembled = assemble(4, [segment(0, 1), segment(2, 2), segment(3, 3)]);
+    expect(ranges(assembled)).toEqual([
       [0, 1],
       [2, 2],
       [3, 3],
@@ -27,46 +40,80 @@ describe("repairNarrationSegments", () => {
   });
 
   it("covers every block exactly once whatever the model returns", () => {
-    const repaired = repairNarrationSegments(8, [
-      segment(5, 9), // runs past the end
+    const assembled = assemble(8, [
       segment(0, 2),
       segment(1, 3), // overlaps the previous one
       segment(2, 2), // already covered
       // 4 is missing
+      segment(5, 9), // runs past the end
     ]);
-    expect(ranges(repaired)).toEqual([
+    expect(ranges(assembled)).toEqual([
       [0, 2],
       [3, 4],
       [5, 7],
     ]);
   });
 
-  it("starts at block zero and ends at the last block", () => {
-    expect(ranges(repairNarrationSegments(5, [segment(2, 3)]))).toEqual([[0, 4]]);
+  it("starts at the first block it owns and ends at the last block", () => {
+    expect(ranges(assemble(5, [segment(2, 3)]))).toEqual([[0, 4]]);
+    expect(ranges(assemble(5, [segment(0, 2), segment(3, 3)], 2))).toEqual([
+      [2, 2],
+      [3, 4],
+    ]);
+  });
+
+  it("holds a segment back until the next draft settles its range", () => {
+    const assembler = makeNarrationAssembler(4);
+    expect(assembler.push(segment(0, 0))).toBeNull();
+    expect(assembler.push(segment(2, 3))).toEqual(segment(0, 1, "blocks 0-0"));
+    expect(assembler.finish()).toEqual(segment(2, 3));
   });
 
   it("folds segments with nothing to say into a neighbor", () => {
-    const repaired = repairNarrationSegments(4, [
+    const assembled = assemble(4, [
       segment(0, 0, "   "),
       segment(1, 1, "First words."),
       segment(2, 2, ""),
       segment(3, 3, "Last words."),
     ]);
-    expect(repaired).toEqual([
+    expect(assembled).toEqual([
       { firstBlock: 0, lastBlock: 2, speech: "First words." },
       { firstBlock: 3, lastBlock: 3, speech: "Last words." },
     ]);
   });
 
   it("normalizes swapped ranges and whitespace", () => {
-    expect(repairNarrationSegments(2, [segment(1, 0, " Both\n blocks. ")])).toEqual([
+    expect(assemble(2, [segment(1, 0, " Both\n blocks. ")])).toEqual([
       { firstBlock: 0, lastBlock: 1, speech: "Both blocks." },
     ]);
   });
 
   it("returns nothing when there is nothing to say", () => {
-    expect(repairNarrationSegments(3, [segment(0, 2, "")])).toEqual([]);
-    expect(repairNarrationSegments(3, [])).toEqual([]);
+    expect(assemble(3, [segment(0, 2, "")])).toEqual([]);
+    expect(assemble(3, [])).toEqual([]);
+  });
+});
+
+describe("verbatimOpening", () => {
+  it("reads leading prose as written until there is enough to cover the wait", () => {
+    const short = "Fixed it.";
+    const long = "The uploader now waits longer between each retry. ".repeat(5).trim();
+    const opening = verbatimOpening(
+      splitReadAloudBlocks(`# Retries\n\n${short}\n\n${long}\n\nMore prose.`),
+    );
+    expect(opening.map((part) => part.speech)).toEqual(["Retries", short, long]);
+    expect(ranges(opening)).toEqual([
+      [0, 0],
+      [1, 1],
+      [2, 2],
+    ]);
+  });
+
+  it("stops at the first block that needs explaining", () => {
+    expect(verbatimOpening(splitReadAloudBlocks("```ts\nretry()\n```\n\nIt retries."))).toEqual([]);
+    expect(verbatimOpening(splitReadAloudBlocks("Done:\n\n- one\n- two"))).toEqual([
+      { firstBlock: 0, lastBlock: 0, speech: "Done:" },
+    ]);
   });
 });
 

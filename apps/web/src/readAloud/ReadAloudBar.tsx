@@ -74,7 +74,8 @@ function ReadAloudControls({
       <ComposerBanner.Content className="text-muted-foreground">
         {active ? (
           <span className="flex-none tabular-nums text-muted-foreground/70">
-            {active.index + 1}/{active.segmentCount}
+            {Math.min(active.index + 1, active.segmentCount)}/
+            {active.complete ? active.segmentCount : "…"}
           </span>
         ) : null}
         <span className="min-w-0 truncate text-foreground/80">{caption}</span>

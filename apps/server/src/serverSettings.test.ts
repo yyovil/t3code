@@ -1305,6 +1305,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         elevenLabsApiKey: "••••••",
         voiceId: "voice-a",
         ttsModel: "eleven_flash_v2_5",
+        prepareInAdvance: false,
       });
       assert.notInclude(yield* fs.readFileString(config.settingsPath), "xi-secret");
       assert.isTrue(Option.isSome(yield* store.get("read-aloud-ZWxldmVuTGFic0FwaUtleQ")));

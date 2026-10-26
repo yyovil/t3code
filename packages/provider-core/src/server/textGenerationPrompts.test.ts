@@ -3,7 +3,7 @@ import * as Effect from "effect/Effect";
 import { it as effectIt } from "@effect/vitest";
 import { describe, expect, it } from "vite-plus/test";
 
-import { decodeJsonReply } from "./textGenerationOperations.ts";
+import { decodeJsonReply, makeNarrationDraftScanner } from "./textGenerationOperations.ts";
 import { buildNarrationPrompt } from "./textGenerationPrompts.ts";
 import { normalizeCliError } from "./textGenerationUtils.ts";
 
@@ -56,6 +56,13 @@ describe("buildNarrationPrompt", () => {
     expect(prompt).not.toContain("<user_message>");
   });
 
+  it("starts the narration after the blocks the listener already heard", () => {
+    const { prompt } = buildNarrationPrompt({ ...input, spokenBlocks: 1 });
+    expect(prompt).toContain("the first starts at block 1,");
+    expect(prompt).toContain("already heard block 0 read word for word");
+    expect(buildNarrationPrompt(input).prompt).toContain("the first starts at block 0,");
+  });
+
   effectIt.effect("decodes segments from a reply wrapped in prose", () =>
     Effect.gen(function* () {
       const { outputSchema } = buildNarrationPrompt(input);
@@ -85,4 +92,31 @@ describe("buildNarrationPrompt", () => {
       expect(error.detail).toBe("Test returned invalid structured output.");
     }),
   );
+});
+
+describe("makeNarrationDraftScanner", () => {
+  it("yields each segment once its object closes in the streamed JSON", () => {
+    const scan = makeNarrationDraftScanner();
+    const json = JSON.stringify({
+      segments: [
+        { firstBlock: 0, lastBlock: 0, speech: 'Braces {like} these and "quotes" stay text.' },
+        { firstBlock: 1, lastBlock: 2, speech: "Then the rest." },
+      ],
+    });
+    const cut = json.indexOf("Then");
+    expect(scan(json.slice(0, 20))).toEqual([]);
+    expect(scan(json.slice(20, cut))).toEqual([
+      { firstBlock: 0, lastBlock: 0, speech: 'Braces {like} these and "quotes" stay text.' },
+    ]);
+    expect(scan(json.slice(cut))).toEqual([
+      { firstBlock: 1, lastBlock: 2, speech: "Then the rest." },
+    ]);
+  });
+
+  it("skips a segment that does not match the schema", () => {
+    const scan = makeNarrationDraftScanner();
+    expect(
+      scan('{"segments": [{"firstBlock": 0}, {"firstBlock": 1, "lastBlock": 1, "speech": "Ok."}]}'),
+    ).toEqual([{ firstBlock: 1, lastBlock: 1, speech: "Ok." }]);
+  });
 });

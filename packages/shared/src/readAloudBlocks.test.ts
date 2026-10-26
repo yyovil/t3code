@@ -4,7 +4,7 @@ import { unified } from "unified";
 import { describe, expect, it } from "vite-plus/test";
 
 import { CHAT_MARKDOWN_REHYPE_PLUGINS, CHAT_MARKDOWN_REMARK_PLUGINS } from "./markdownPipeline.ts";
-import { rehypeReadAloudAnchors, splitReadAloudBlocks } from "./readAloudBlocks.ts";
+import { rehypeReadAloudAnchors, splitReadAloudBlocks, verbatimSpeech } from "./readAloudBlocks.ts";
 
 const reply = [
   "# Upload retries",
@@ -89,5 +89,16 @@ describe("splitReadAloudBlocks", () => {
 
   it("returns nothing for an empty message", () => {
     expect(splitReadAloudBlocks("  \n\n")).toEqual([]);
+  });
+});
+
+describe("verbatimSpeech", () => {
+  it("reads prose without its markdown and leaves code to the narrator", () => {
+    const [heading, paragraph, code] = splitReadAloudBlocks(
+      "## Fixed **the** retry\n\nUploads now [retry](https://x.test) up to `5` times,\nthen fail.\n\n```ts\nretry()\n```",
+    );
+    expect(verbatimSpeech(heading!)).toBe("Fixed the retry");
+    expect(verbatimSpeech(paragraph!)).toBe("Uploads now retry up to 5 times, then fail.");
+    expect(verbatimSpeech(code!)).toBeNull();
   });
 });

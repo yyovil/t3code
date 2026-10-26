@@ -1,4 +1,4 @@
-import type { Root, RootContent } from "mdast";
+import type { Nodes, Root, RootContent } from "mdast";
 import remarkParse from "remark-parse";
 import { unified } from "unified";
 
@@ -82,6 +82,34 @@ export function splitReadAloudBlocks(text: string): ReadonlyArray<ReadAloudBlock
     if (kind !== null) push(kind, node);
   }
   return blocks;
+}
+
+function plainText(node: Nodes): string {
+  switch (node.type) {
+    case "text":
+    case "inlineCode":
+    case "inlineMath":
+      return node.value;
+    case "image":
+      return node.alt ?? "";
+    case "break":
+      return " ";
+    case "html":
+      return "";
+    default:
+      return "children" in node ? node.children.map(plainText).join("") : "";
+  }
+}
+
+/**
+ * A paragraph or heading as the words a voice can read straight through, with
+ * the markdown dropped. Null for blocks that need explaining instead.
+ */
+export function verbatimSpeech(block: ReadAloudBlock): string | null {
+  if (block.kind !== "paragraph" && block.kind !== "heading") return null;
+  const tree = processor.runSync(processor.parse(block.source)) as Root;
+  const speech = plainText(tree).replace(/\s+/g, " ").trim();
+  return speech.length > 0 ? speech : null;
 }
 
 /** The attribute `rehypeReadAloudAnchors` writes, as it appears in the DOM. */

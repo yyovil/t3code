@@ -71,11 +71,6 @@ export const ReadAloudSegment = Schema.Struct({
 });
 export type ReadAloudSegment = typeof ReadAloudSegment.Type;
 
-export const ReadAloudPrepareResult = Schema.Struct({
-  segments: Schema.Array(ReadAloudSegment),
-});
-export type ReadAloudPrepareResult = typeof ReadAloudPrepareResult.Type;
-
 export const ReadAloudVoice = Schema.Struct({
   voiceId: Schema.String,
   name: Schema.String,

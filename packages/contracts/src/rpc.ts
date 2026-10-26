@@ -106,7 +106,7 @@ import {
   ReadAloudListVoicesResult,
   ReadAloudPrepareError,
   ReadAloudPrepareInput,
-  ReadAloudPrepareResult,
+  ReadAloudSegment,
 } from "./readAloud.ts";
 import {
   PersistChatAttachmentsError,
@@ -1301,10 +1301,12 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
   ]),
 });
 
+/** Streams the narration's segments in order, each as soon as the server has it. */
 const WsReadAloudPrepareRpc = Rpc.make(WS_METHODS.readAloudPrepare, {
   payload: ReadAloudPrepareInput,
-  success: ReadAloudPrepareResult,
+  success: ReadAloudSegment,
   error: Schema.Union([ReadAloudPrepareError, EnvironmentAuthorizationError]),
+  stream: true,
 });
 
 const WsReadAloudListVoicesRpc = Rpc.make(WS_METHODS.readAloudListVoices, {

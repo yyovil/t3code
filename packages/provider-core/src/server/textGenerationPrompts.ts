@@ -467,6 +467,8 @@ export function buildThreadTitlePrompt(input: ThreadTitlePromptInput) {
 export interface NarrationPromptInput {
   blocks: ReadonlyArray<NarrationBlock>;
   subject: NarrationSubject;
+  /** Leading blocks the listener already heard word for word. */
+  spokenBlocks?: number | undefined;
 }
 
 const NARRATION_INTRO = {
@@ -480,6 +482,7 @@ Talk like a teammate walking the user through the document on a call:`,
 
 const NARRATION_RULES = (
   noun: "reply" | "document",
+  firstBlock: number,
 ) => `- Plain English and short sentences. Say what matters first.
 - Explain jargon in a few words the first time it comes up.
 ${noun === "reply" ? "- Tie the explanation back to what the user asked." : "- Keep the document's structure: say when a new section starts and what it is about."}
@@ -490,7 +493,8 @@ ${noun === "reply" ? "- Tie the explanation back to what the user asked." : "- K
 
 Return a JSON object with one key, segments: the spoken explanation in reading order. Each segment is {firstBlock, lastBlock, speech}:
 - firstBlock and lastBlock are the inclusive range of block indices the segment explains.
-- Segments cover every block exactly once, in order: the first starts at block 0, each starts right after the previous one ends, and the last ends at the final block.
+- Segments cover every block exactly once, in order: the first starts at block ${firstBlock}, each starts right after the previous one ends, and the last ends at the final block.
+- The voice starts speaking as soon as the first segment is written, so keep that one to one or two short sentences.
 - Usually one segment per block. Merge small related blocks, such as a heading and the paragraph under it, or a short list, into one segment.
 - speech is one to four sentences. A block that adds nothing to say aloud, like a code block the surrounding text already explains, still belongs to a segment: merge it with a neighbor and mention it briefly if at all.
 
@@ -550,9 +554,10 @@ function narrationReplyContext(subject: Extract<NarrationSubject, { kind: "reply
 export function buildNarrationPrompt(input: NarrationPromptInput) {
   const { subject } = input;
   const noun = subject.kind;
+  const spoken = Math.min(input.spokenBlocks ?? 0, Math.max(input.blocks.length - 1, 0));
   const prompt = [
     NARRATION_INTRO[noun],
-    NARRATION_RULES(noun),
+    NARRATION_RULES(noun, spoken),
     "",
     ...(subject.kind === "reply"
       ? narrationReplyContext(subject)
@@ -560,6 +565,12 @@ export function buildNarrationPrompt(input: NarrationPromptInput) {
     "",
     `The ${noun} to explain, as ${input.blocks.length} blocks:`,
     narrationBlocks(input.blocks),
+    ...(spoken > 0
+      ? [
+          "",
+          `The listener has already heard ${spoken === 1 ? "block 0" : `blocks 0 to ${spoken - 1}`} read word for word. Do not narrate ${spoken === 1 ? "it" : "them"} again; treat ${spoken === 1 ? "it" : "them"} as context and start your first segment at block ${spoken}.`,
+        ]
+      : []),
   ].join("\n");
 
   const outputSchema = Schema.Struct({

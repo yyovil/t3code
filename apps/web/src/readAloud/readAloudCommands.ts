@@ -1,12 +1,12 @@
 import { WS_METHODS } from "@t3tools/contracts";
 import {
-  createEnvironmentRpcCommand,
   createEnvironmentRpcQueryAtomFamily,
+  createEnvironmentRpcStreamCommand,
 } from "@t3tools/client-runtime/state/runtime";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 
-export const readAloudPrepare = createEnvironmentRpcCommand(connectionAtomRuntime, {
+export const readAloudPrepare = createEnvironmentRpcStreamCommand(connectionAtomRuntime, {
   label: "environment-data:read-aloud:prepare",
   tag: WS_METHODS.readAloudPrepare,
 });

@@ -1,11 +1,12 @@
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { type ChatAttachment, type ModelSelection, TextGenerationError } from "@t3tools/contracts";
 import { formatGeneratedBranchName, sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
-import type { ProviderTextGeneration } from "./textGeneration.ts";
+import type { NarrationSegmentDraft, ProviderTextGeneration } from "./textGeneration.ts";
 import {
   buildBranchNamePrompt,
   buildCommitMessagePrompt,
@@ -35,6 +36,11 @@ export interface Request<S extends Schema.Top> {
    * runner that cannot guarantee read-only tools fails rather than answering blind.
    */
   readonly investigate?: { readonly timeoutMs: number } | undefined;
+  /**
+   * Receives the structured output's JSON text in pieces as the model writes it. Runners that
+   * cannot stream never call it and only return the decoded result.
+   */
+  readonly onPartialOutput?: ((chunk: string) => Effect.Effect<void>) | undefined;
 }
 
 const INVESTIGATION_TIMEOUT_MS = 15 * 60_000;
@@ -174,10 +180,18 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
   const generateNarration: ProviderTextGeneration["generateNarration"] = Effect.fn(
     `${name}.generateNarration`,
   )(function* (input) {
+    const { onDraft } = input;
+    const scan = makeNarrationDraftScanner();
     return yield* run({
       operation: "generateNarration",
       cwd: input.cwd,
       modelSelection: input.modelSelection,
+      ...(onDraft
+        ? {
+            onPartialOutput: (chunk: string) =>
+              Effect.forEach(scan(chunk), onDraft, { discard: true }),
+          }
+        : {}),
       ...buildNarrationPrompt(input),
     });
   });
@@ -190,4 +204,55 @@ export function fromRunner(name: string, run: Runner): ProviderTextGeneration {
     generateReviewGuide,
     generateNarration,
   } satisfies ProviderTextGeneration;
+}
+
+const NarrationDraft = Schema.Struct({
+  firstBlock: Schema.Int,
+  lastBlock: Schema.Int,
+  speech: Schema.String,
+});
+const decodeNarrationDraft = Schema.decodeUnknownOption(Schema.fromJsonString(NarrationDraft));
+
+/**
+ * Picks finished segments out of `{"segments": [...]}` while it is still being
+ * written: each one as soon as its object closes, so speech can start before
+ * the model is done. Feed it consecutive pieces of the JSON text.
+ */
+export function makeNarrationDraftScanner(): (
+  chunk: string,
+) => ReadonlyArray<NarrationSegmentDraft> {
+  let text = "";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let start = -1;
+  return (chunk) => {
+    const drafts: Array<NarrationSegmentDraft> = [];
+    const from = text.length;
+    text += chunk;
+    for (let index = from; index < text.length; index++) {
+      const char = text[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') {
+        inString = true;
+      } else if (char === "{" || char === "[") {
+        depth++;
+        // Depth 1 is the root object, 2 the segments array, 3 one segment.
+        if (depth === 3 && char === "{") start = index;
+      } else if (char === "}" || char === "]") {
+        if (depth === 3 && start >= 0) {
+          const draft = decodeNarrationDraft(text.slice(start, index + 1));
+          if (Option.isSome(draft)) drafts.push(draft.value);
+          start = -1;
+        }
+        depth--;
+      }
+    }
+    return drafts;
+  };
 }

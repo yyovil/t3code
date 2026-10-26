@@ -252,6 +252,23 @@ function ReadAloudSettingsForm() {
       <NarrationModelRow />
 
       <SettingsRow
+        serverScoped
+        settingKeys={["readAloud"]}
+        {...searchableSetting("read-aloud-prepare")}
+        description="Write the narration as soon as each reply finishes, so playback starts at once. Uses the narration model for every reply, even ones you never play."
+        control={
+          <Switch
+            checked={readAloud.prepareInAdvance}
+            disabled={!hasKey}
+            onCheckedChange={(checked) =>
+              updateSettings({ readAloud: { prepareInAdvance: checked } })
+            }
+            aria-label="Prepare narration in advance"
+          />
+        }
+      />
+
+      <SettingsRow
         {...searchableSetting("read-aloud-speed")}
         description="Where playback starts. Changing speed while listening updates it."
         control={
