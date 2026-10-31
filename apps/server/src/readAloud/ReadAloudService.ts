@@ -257,8 +257,9 @@ const make = Effect.fn("ReadAloudService.make")(function* (options?: {
   const apiKey = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.readAloud.elevenLabsApiKey),
     Effect.orElseSucceed(() => ""),
-    Effect.flatMap((key) =>
-      key.length > 0 ? Effect.succeed(key) : Effect.fail(new ReadAloudNotConfiguredError()),
+    Effect.filterOrFail(
+      (key) => key.length > 0,
+      () => new ReadAloudNotConfiguredError(),
     ),
   );
 

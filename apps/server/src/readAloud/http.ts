@@ -56,8 +56,6 @@ const serve = Effect.fnUntraced(
         ReadAloudNotConfiguredError: (error) =>
           HttpServerResponse.json({ message: error.message }, { status: 409, headers: NO_STORE }),
       }),
-      Effect.catch(() =>
-        Effect.succeed(HttpServerResponse.text("Internal Server Error", { status: 500 })),
-      ),
+      Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
     ),
 );

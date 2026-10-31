@@ -160,6 +160,7 @@ export function ReadAloudDocumentBar({
   readonly stopShortcut: string | null;
 }) {
   const state = useReadAloudState();
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- stops the shared audio player when this file's preview unmounts or switches files
   useEffect(() => {
     if (path === null) return;
     const key = readAloudKey({ kind: "document", path });
@@ -179,7 +180,7 @@ export function ReadAloudDocumentBar({
       <ComposerBanner.Root
         role="region"
         aria-label="Read aloud"
-        placement="floating"
+        detached
         className="pointer-events-auto w-full max-w-xl"
       >
         <ReadAloudControls state={state} stopShortcut={stopShortcut} />
